@@ -1,0 +1,10 @@
+{
+  "name": "postfix",
+  "latest_version": "https://supermarket.chef.io/api/v1/cookbooks/postfix/versions/6.1.8",
+  "versions": [
+    "https://supermarket.chef.io/api/v1/cookbooks/postfix/versions/6.1.8",
+    "https://supermarket.chef.io/api/v1/cookbooks/postfix/versions/6.0.2",
+    "https://supermarket.chef.io/api/v1/cookbooks/postfix/versions/5.5.1",
+    "https://supermarket.chef.io/api/v1/cookbooks/postfix/versions/5.0.0"
+  ]
+}

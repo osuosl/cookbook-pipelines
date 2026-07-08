@@ -1,0 +1,15 @@
+{
+  "action": "labeled",
+  "label": { "name": "bump/minor" },
+  "pull_request": {
+    "number": 42,
+    "title": "Add TLS support",
+    "html_url": "https://github.com/osuosl-cookbooks/osl-apache/pull/42"
+  },
+  "repository": {
+    "name": "osl-apache",
+    "full_name": "osuosl-cookbooks/osl-apache",
+    "default_branch": "master"
+  },
+  "sender": { "login": "ramereth" }
+}

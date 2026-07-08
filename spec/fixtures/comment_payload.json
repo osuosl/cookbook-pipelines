@@ -1,0 +1,19 @@
+{
+  "action": "created",
+  "comment": {
+    "body": "!bump patch envs=production,staging chain=postfix-refactor",
+    "user": { "login": "ramereth" }
+  },
+  "issue": {
+    "number": 42,
+    "title": "Add TLS support",
+    "html_url": "https://github.com/osuosl-cookbooks/osl-apache/pull/42",
+    "pull_request": { "url": "https://api.github.com/repos/osuosl-cookbooks/osl-apache/pulls/42" }
+  },
+  "repository": {
+    "name": "osl-apache",
+    "full_name": "osuosl-cookbooks/osl-apache",
+    "default_branch": "master"
+  },
+  "sender": { "login": "ramereth" }
+}

@@ -6,6 +6,7 @@ RSpec.describe CookbookBumper do
   let(:env) do
     {
       'GITHUB_ORG' => 'osuosl-cookbooks',
+      'GITHUB_TOKEN' => 'test-token',
       'WORKSPACE' => workspace,
       'RESULT_FILE' => File.join(workspace, 'bump_result.json'),
       'DO_NOT_UPLOAD' => 'true',

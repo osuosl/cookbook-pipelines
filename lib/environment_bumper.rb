@@ -64,7 +64,7 @@ class EnvironmentBumper
     default_branch = @github.repo(chef_repo).default_branch
     workdir = File.join(@env.fetch('WORKSPACE', Dir.pwd), 'chef-repo')
     FileUtils.rm_rf(workdir)
-    repo = @git.clone(GithubHelpers.authenticated_url(chef_repo), workdir)
+    repo = @git.clone(GithubHelpers.authenticated_url(chef_repo, token: @env.fetch('GITHUB_TOKEN')), workdir)
     repo.checkout(default_branch)
 
     branch, existing_branch = check_out_bump_branch(repo)

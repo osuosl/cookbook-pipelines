@@ -7,6 +7,7 @@ RSpec.describe EnvironmentBumper do
   let(:env) do
     {
       'CHEF_REPO' => 'osuosl/chef-repo',
+      'GITHUB_TOKEN' => 'test-token',
       'WORKSPACE' => workspace,
       'DEFAULT_ENVIRONMENTS' => 'production,workstation',
       'cookbooks' => 'osl-postfix:2.1.0,postfix:6.1.8',

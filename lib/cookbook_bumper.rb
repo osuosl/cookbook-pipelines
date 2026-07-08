@@ -212,7 +212,7 @@ class CookbookBumper
     base = pr.base.ref
     workdir = File.join(@env.fetch('WORKSPACE', Dir.pwd), 'cookbook')
     FileUtils.rm_rf(workdir)
-    repo = @git.clone(GithubHelpers.authenticated_url(repo_path), workdir)
+    repo = @git.clone(GithubHelpers.authenticated_url(repo_path, token: @env.fetch('GITHUB_TOKEN')), workdir)
     repo.checkout(base)
 
     version = Dir.chdir(workdir) do

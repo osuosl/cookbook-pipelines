@@ -17,6 +17,9 @@ pipeline {
   stages {
     stage('Bump cookbook') {
       steps {
+        // A stale result file from a previous build would retrigger the
+        // environment bumper even when this run produces none.
+        sh 'rm -f "$RESULT_FILE"'
         withCredentials([usernamePassword(
           credentialsId: 'cookbook_uploader',
           usernameVariable: 'GITHUB_USER',

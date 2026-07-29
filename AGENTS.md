@@ -31,13 +31,18 @@ cookbook via JCasC job-dsl.
   versions in chef-repo `environments/*.json` and opens/updates a PR. Supports
   multi-cookbook pins and chains via its `chain` parameter.
 - `pipelines/github-sync.Jenkinsfile` + `lib/github_sync.rb` — scheduled
-  (every 30 min + on-demand) reconciliation of GitHub-side state: seeds `bump/*` and
-  `env/*` labels and the uploader webhook in every non-archived org repo,
-  and removes the legacy webhooks (per-repo uploader hook, GHPRB
-  `/ghprbhook/`) from repos that have a Jenkinsfile, i.e. have migrated.
+  (every 30 min + on-demand) reconciliation of GitHub-side state: seeds `bump/*`
+  (incl. `bump/skip`) and `env/*` labels and the uploader webhook in every
+  non-archived org repo, removes the legacy webhooks (per-repo uploader hook,
+  GHPRB `/ghprbhook/`) from repos that have a Jenkinsfile, grants the standing
+  team permissions (chefs/staff write, ci/core admin), and enables
+  `delete_branch_on_merge`.
   Deliberately not part of the chef converge. Supports `DRY_RUN` and a `REPOS`
   canary list; also restricts default-branch merges to the bot account
-  (PROTECT_BRANCHES) so PRs cannot be merged manually. Per-repo failures mark
+  (PROTECT_BRANCHES) so PRs cannot be merged manually. `enforce_admins` is
+  deliberately false, leaving repo admins a manual escape hatch — the bot holds
+  admin too, so `cookbook_bumper` checks `mergeable_state` itself and refuses
+  to merge anything branch protection would block for a normal user. Per-repo failures mark
   the build UNSTABLE, not failed. Needs the out-of-band
   `cookbook_uploader_trigger` secret-text credential.
 - `lib/` + `bin/` — the Ruby implementation. `lib/` classes are dependency-

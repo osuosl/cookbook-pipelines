@@ -7,7 +7,8 @@ Jenkins pipeline tooling for OSUOSL's Chef cookbook automation:
   `osuosl-cookbooks` organization folder on Jenkins.
 - **cookbook-uploader** (`pipelines/`, `lib/`, `bin/`) — label-driven cookbook
   release pipeline: apply `bump/patch|minor|major` (plus optional `env/*`
-  labels) to a PR and Jenkins merges it, bumps the version, tags, uploads to
+  labels, or `bump/skip` to merge with no release) to a PR and Jenkins merges
+  it, bumps the version, tags, uploads to
   the Chef server/supermarket, and uploads any community cookbook dependencies
   the PR's metadata.rb changes require (already-uploaded versions are
   skipped). Releasing requires GitHub write access. A `Cookbook-Chain:` line
@@ -21,9 +22,11 @@ Jenkins pipeline tooling for OSUOSL's Chef cookbook automation:
 - **github-sync** — scheduled reconciliation (every 30 minutes + on demand)
   of GitHub-side state across the org: seeds the `bump/*`/`env/*` labels,
   manages the uploader webhooks, removes the legacy webhooks from repos that
-  have migrated (Jenkinsfile present), and restricts default-branch merges to
-  the Jenkins bot so PRs can only land through the bump workflow. Supports
-  `DRY_RUN` and a `REPOS` canary list.
+  have migrated (Jenkinsfile present), grants the standing team permissions,
+  enables auto-delete of merged branches, and restricts default-branch merges
+  to the Jenkins bot so PRs can only land through the bump workflow (repo
+  admins stay exempt as an escape hatch). Supports `DRY_RUN` and a `REPOS`
+  canary list.
 
 The pipelines run against cinc-workstation's embedded ruby on the Jenkins
 controller — nothing is installed at release time and bundler is a dev/test

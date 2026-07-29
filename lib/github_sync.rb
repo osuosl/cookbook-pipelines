@@ -38,6 +38,8 @@ class GithubSync
     'bump/major' => 'b60205',
     'bump/minor' => 'd93f0b',
     'bump/patch' => '0e8a16',
+    # Merge with no release, for changes that don't affect production code.
+    'bump/skip' => 'ededed',
     'env/all' => '1d76db',
     'env/default' => '1d76db',
   }.freeze
@@ -45,6 +47,15 @@ class GithubSync
   # NOTE: issue_comment stays with the legacy freestyle jobs until cutover;
   # subscribing it here too would run two releases for one !bump comment.
   HOOK_EVENTS = %w(pull_request).freeze
+
+  # Team access granted on every cookbook repo. 'push' is GitHub's API name
+  # for write.
+  TEAM_PERMISSIONS = {
+    'chefs' => 'push',
+    'ci' => 'admin',
+    'core' => 'admin',
+    'staff' => 'push',
+  }.freeze
 
   def self.from_env
     new
@@ -100,16 +111,14 @@ class GithubSync
     requested = @env.fetch('REPOS', '').split(',').map(&:strip).reject(&:empty?)
     return requested unless requested.empty?
 
-    discovered.map(&:name).sort
+    @github.org_repos(org).reject(&:archived?).map(&:name).sort
   end
 
-  def discovered
-    @discovered ||= @github.org_repos(org).reject(&:archived?)
-  end
-
-  def default_branch(repo_name)
-    known = @discovered&.find { |r| r.name == repo_name }
-    known ? known.default_branch : @github.repo("#{org}/#{repo_name}").default_branch
+  # Full repo representation, memoized: the org listing omits some settings
+  # (delete_branch_on_merge), so fetch each repo once and reuse it.
+  def repo_info(repo_name)
+    @repo_info ||= {}
+    @repo_info[repo_name] ||= @github.repository("#{org}/#{repo_name}")
   end
 
   def sync_repo(repo_name, stats)
@@ -118,7 +127,33 @@ class GithubSync
     hooks = @github.hooks(repo_path)
     ensure_hook(repo_path, hooks, stats)
     remove_legacy_hooks(repo_path, repo_name, hooks, stats)
-    ensure_branch_protection(repo_name, stats)
+    ensure_teams(repo_path, stats)
+    ensure_repo_settings(repo_name, repo_path, stats)
+    ensure_branch_protection(repo_name, repo_path, stats)
+  end
+
+  # Grant the standing team access. Only writes when a team is missing or has
+  # the wrong permission, so a steady-state run issues no mutations.
+  def ensure_teams(repo_path, stats)
+    current = @github.repository_teams(repo_path).to_h { |t| [t.slug, t.permission] }
+    TEAM_PERMISSIONS.each do |slug, permission|
+      next if current[slug] == permission
+
+      act("grant #{slug} #{permission} on #{repo_path}") do
+        @github.put("/orgs/#{org}/teams/#{slug}/repos/#{repo_path}", permission: permission)
+      end
+      stats[:teams_updated] += 1
+    end
+  end
+
+  # Delete the source branch automatically once a PR merges.
+  def ensure_repo_settings(repo_name, repo_path, stats)
+    return if repo_info(repo_name).to_h[:delete_branch_on_merge]
+
+    act("enable delete_branch_on_merge on #{repo_path}") do
+      @github.edit_repository(repo_path, delete_branch_on_merge: true)
+    end
+    stats[:settings_updated] += 1
   end
 
   def seed_labels(repo_path, stats)
@@ -205,20 +240,24 @@ class GithubSync
   end
 
   # Merging a PR is a push to the base branch, so restricting pushes on the
-  # default branch to the bot user removes the merge button for everyone else
-  # (enforce_admins included - admins are exactly who accidentally merges).
-  # Releases must go through the bump labels; see the org docs.
+  # default branch to the bot removes the merge button for everyone else and
+  # forces releases through the bump labels.
+  #
+  # enforce_admins is deliberately FALSE: repo admins keep a manual escape
+  # hatch for when the automation can't be used. The bot also holds admin (it
+  # needs it to manage protection and hooks), so it would inherit that bypass
+  # too - cookbook_bumper therefore checks mergeable_state itself and refuses
+  # to merge a PR that branch protection would block for a normal user.
   #
   # CAUTION: the protection endpoint is a full-replace PUT. Existing settings
-  # (required checks, review rules) are read first and carried forward
-  # unchanged; only the push restriction and enforce_admins are overlaid.
-  # Never turn this into a blind PUT - authoritative-on-apply APIs have
-  # burned us before.
-  def ensure_branch_protection(repo_name, stats)
+  # (required checks, review rules, team restrictions) are read first and
+  # carried forward unchanged; only the push restriction and enforce_admins
+  # are overlaid. Never turn this into a blind PUT - authoritative-on-apply
+  # APIs have burned us before.
+  def ensure_branch_protection(repo_name, repo_path, stats)
     return unless @env.fetch('PROTECT_BRANCHES', 'true') == 'true'
 
-    repo_path = "#{org}/#{repo_name}"
-    branch = default_branch(repo_name)
+    branch = repo_info(repo_name).default_branch
     bot = @env.fetch('GITHUB_USER')
 
     existing = begin
@@ -242,7 +281,7 @@ class GithubSync
     return false if existing.nil?
 
     users = (existing.restrictions&.users || []).map(&:login)
-    users == [bot] && existing.enforce_admins&.enabled
+    users == [bot] && existing.enforce_admins&.enabled == false
   end
 
   # Build the full PUT body: desired restriction + everything the repo
@@ -251,7 +290,9 @@ class GithubSync
     checks = existing&.required_status_checks
     reviews = existing&.required_pull_request_reviews
     {
-      enforce_admins: true,
+      # False on purpose: admins keep a manual merge escape hatch. See
+      # ensure_branch_protection.
+      enforce_admins: false,
       restrictions: {
         users: [bot],
         teams: (existing&.restrictions&.teams || []).map(&:slug),
@@ -289,6 +330,8 @@ class GithubSync
     @out.puts "  hooks updated:      #{stats[:hooks_updated]}"
     @out.puts "  hooks current:      #{stats[:unchanged]}"
     @out.puts "  legacy hooks gone:  #{stats[:legacy_hooks_removed]}"
+    @out.puts "  team grants:        #{stats[:teams_updated]}"
+    @out.puts "  repo settings:      #{stats[:settings_updated]}"
     @out.puts "  protection updated: #{stats[:protection_updated]}"
     @out.puts "  protection current: #{stats[:protection_current]}"
     @out.puts "  failures:           #{failures.size}"

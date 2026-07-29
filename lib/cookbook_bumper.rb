@@ -13,6 +13,9 @@ require_relative 'github_helpers'
 # `env/<name>`, `env/default`, and `env/all` labels select the chef-repo
 # environments to pin.
 #
+# `bump/skip` merges the PR with no release at all, for changes that don't
+# affect production cookbook code.
+#
 # Chained bumps (several related releases accumulating into ONE chef-repo PR)
 # are requested with a `Cookbook-Chain: <name>` line in the PR description or
 # in a commit message on the PR - labels can't carry free-form names without
@@ -33,7 +36,13 @@ class CookbookBumper
   end
 
   LEVELS = %w(major minor patch).freeze
-  BUMP_LABEL_RE = %r{\Abump/(#{LEVELS.join('|')})\z}
+  # bump/skip merges the PR with no release: for changes that don't affect
+  # production cookbook code (CI config, docs, the migration Jenkinsfile).
+  SKIP = 'skip'.freeze
+  BUMP_LABEL_RE = %r{\Abump/(#{(LEVELS + [SKIP]).join('|')})\z}
+  # States a non-admin could merge. The bot holds admin and would bypass
+  # branch protection, so refuse anything else rather than exploiting that.
+  MERGEABLE_STATES = %w(clean unstable).freeze
   ENV_LABEL_RE = %r{\Aenv/(\S+)\z}
   # Matches a 'Cookbook-Chain: <value>' line in a PR body or commit message.
   CHAIN_DIRECTIVE_RE = /^cookbook-chain:[ \t]*(\S+)[ \t]*$/i
@@ -41,7 +50,7 @@ class CookbookBumper
   # free-form name: a full PR URL or [org/]repo#123.
   CHAIN_PR_URL_RE = %r{\Ahttps?://github\.com/[^/]+/([^/]+)/pull/(\d+)/?\z}i
   CHAIN_PR_REF_RE = %r{\A(?:[\w.-]+/)?([\w.-]+)#(\d+)\z}
-  COMMENT_RE = /\A!bump (#{LEVELS.join('|')})(\s.*)?\z/
+  COMMENT_RE = /\A!bump (#{(LEVELS + [SKIP]).join('|')})(\s.*)?\z/
   METADATA_FILE = 'metadata.rb'.freeze
   CHANGELOG_FILE = 'CHANGELOG.md'.freeze
   VERSION_RE = /^(version\s+)(["'])(\d+\.\d+\.\d+)\2$/
@@ -90,6 +99,16 @@ class CookbookBumper
 
     authorize_actor!
     pr = wait_for_mergeable(pr)
+
+    # bump/skip: merge only, no version bump, upload or environment bump.
+    if request[:level] == SKIP
+      @github.merge_pull_request(repo_path, pr_number)
+      delete_source_branch(pr)
+      @github.add_comment(repo_path, pr_number,
+                          'Merged without a release (`bump/skip`): no version bump, upload or environment change.')
+      @out.puts 'Merged with bump/skip; no release performed.'
+      return nil
+    end
 
     request = merge_labels_into(request, pr) if request[:source] == :label
     # An explicit chain= from the comment fallback wins; otherwise honor a
@@ -261,16 +280,35 @@ class CookbookBumper
     @github.pull_request(repo_path, pr_number)
   end
 
-  # GitHub computes mergeability lazily; nil means "not done yet".
+  # GitHub computes mergeability lazily; 'unknown' means "not done yet".
+  # Checking mergeable_state (not just mergeable) is what makes the bot
+  # respect required reviews and required checks even though its admin
+  # permission would let it bypass them.
   def wait_for_mergeable(pr)
     MERGEABLE_ATTEMPTS.times do
-      return pr if pr.mergeable
-      raise Error, 'PR cannot be merged cleanly.' if pr.mergeable == false
+      state = pr.mergeable_state.to_s
+      return pr if MERGEABLE_STATES.include?(state)
+      raise Error, mergeable_error(state) unless state.empty? || state == 'unknown'
 
       @sleeper.call(2)
       pr = fetch_pr
     end
     raise Error, 'PR mergeability is still unknown, try again.'
+  end
+
+  def mergeable_error(state)
+    case state
+    when 'dirty'
+      'PR has merge conflicts.'
+    when 'blocked'
+      'PR is blocked by branch protection: it needs an approving review and/or passing required checks.'
+    when 'behind'
+      'PR is out of date with its base branch; update the branch first.'
+    when 'draft'
+      'PR is still a draft.'
+    else
+      "PR is not in a mergeable state (#{state})."
+    end
   end
 
   def delete_source_branch(pr)

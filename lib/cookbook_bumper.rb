@@ -10,13 +10,17 @@ require_relative 'github_helpers'
 # Triggered from a GitHub webhook payload (pull_request or issue_comment
 # event). The primary interface is labels: applying `bump/major`,
 # `bump/minor`, or `bump/patch` to a PR merges it and performs the release;
-# `env/<name>`, `env/default`, `env/all`, and `chain/<name>` labels select the
-# chef-repo environments to pin and an optional chain PR to accumulate into.
-# Authorization is GitHub-native: only users who can label a PR (triage+) can
-# trigger a bump.
+# `env/<name>`, `env/default`, and `env/all` labels select the chef-repo
+# environments to pin.
+#
+# Chained bumps (several related releases accumulating into ONE chef-repo PR)
+# are requested with a `Cookbook-Chain: <name>` line in the PR description or
+# in a commit message on the PR - labels can't carry free-form names without
+# per-repo label churn. Use the same chain name on every PR in the series.
 #
 # A `!bump <level> [envs] [envs=a,b] [chain=name]` PR comment is retained as a
 # fallback for ad-hoc input; commenters must have write access to the repo.
+# An explicit `chain=` there overrides any Chain: directive.
 #
 # The release: merge the PR, bump the version in metadata.rb, prepend a
 # CHANGELOG entry, tag, push to the PR's base branch (no branch name is ever
@@ -31,7 +35,12 @@ class CookbookBumper
   LEVELS = %w(major minor patch).freeze
   BUMP_LABEL_RE = %r{\Abump/(#{LEVELS.join('|')})\z}
   ENV_LABEL_RE = %r{\Aenv/(\S+)\z}
-  CHAIN_LABEL_RE = %r{\Achain/(\S+)\z}
+  # Matches a 'Cookbook-Chain: <value>' line in a PR body or commit message.
+  CHAIN_DIRECTIVE_RE = /^cookbook-chain:[ \t]*(\S+)[ \t]*$/i
+  # Chain values may be a Gerrit-Depends-On-style PR reference instead of a
+  # free-form name: a full PR URL or [org/]repo#123.
+  CHAIN_PR_URL_RE = %r{\Ahttps?://github\.com/[^/]+/([^/]+)/pull/(\d+)/?\z}i
+  CHAIN_PR_REF_RE = %r{\A(?:[\w.-]+/)?([\w.-]+)#(\d+)\z}
   COMMENT_RE = /\A!bump (#{LEVELS.join('|')})(\s.*)?\z/
   METADATA_FILE = 'metadata.rb'.freeze
   CHANGELOG_FILE = 'CHANGELOG.md'.freeze
@@ -71,27 +80,51 @@ class CookbookBumper
       return nil
     end
 
+    # The payload is attacker-controllable: the trigger endpoint is
+    # unauthenticated apart from a shared token, so never act on a repo
+    # outside our own org.
+    verify_repo_in_org!
+
     pr = fetch_pr
     raise Error, 'PR is already merged.' if pr.merged
 
-    authorize_commenter! if request[:source] == :comment
+    authorize_actor!
     pr = wait_for_mergeable(pr)
 
     request = merge_labels_into(request, pr) if request[:source] == :label
+    # An explicit chain= from the comment fallback wins; otherwise honor a
+    # 'Cookbook-Chain: <value>' directive in the PR body or a commit message.
+    request[:chain] ||= chain_directive(pr)
+    request[:chain] = normalize_chain(request[:chain])
 
     @github.merge_pull_request(repo_path, pr_number)
     delete_source_branch(pr)
 
     version = release(pr)
-    community = @community_deps.call(repo_path, pr_number)
-    announce(pr, request, version, community)
+
+    # The release is already published at this point, so a community upload
+    # failure must not abort the run: it would skip the PR comment and the
+    # environment bump, and the bump cannot be retried (the PR is merged).
+    # Uploading an already-frozen shared dependency is a routine non-zero exit.
+    community_error = nil
+    community = begin
+      @community_deps.call(repo_path, pr_number)
+    rescue StandardError => e
+      community_error = e
+      @out.puts "Community dependency upload failed: #{e.class}: #{e.message}"
+      []
+    end
+
+    announce(pr, request, version, community, community_error)
 
     result = {
       'cookbooks' => [{ 'name' => repo_name, 'version' => version }] +
                      community.map { |c| { 'name' => c[:name], 'version' => c[:version] } },
       'envs' => request[:envs].join(','),
-      'chain' => request[:chain],
-      'pr_link' => pr.html_url,
+      # Emit strings, never nil: a JSON null round-trips through Jenkins'
+      # readJSON as a truthy JSONNull and becomes the literal chain "null".
+      'chain' => request[:chain].to_s,
+      'pr_link' => pr.html_url.to_s,
     }
     write_result(result) unless request[:envs].empty?
     result
@@ -160,25 +193,68 @@ class CookbookBumper
     end
   end
 
-  # On the label path, env/chain selection comes from the PR's current labels.
+  # On the label path, environment selection comes from the PR's current labels.
   def merge_labels_into(request, pr)
     pr.labels.each do |label|
       if (match = ENV_LABEL_RE.match(label.name))
         request[:envs] << match[1]
-      elsif (match = CHAIN_LABEL_RE.match(label.name))
-        request[:chain] = match[1]
       end
     end
     request
   end
 
-  # Label application is authorized by GitHub itself (triage+). Comments are
-  # open to anyone, so require push access for the fallback path.
-  def authorize_commenter!
-    level = @github.permission_level(repo_path, actor).permission
+  # A chain value travels as a 'Cookbook-Chain: <value>' line in the PR
+  # description (preferred, visible to reviewers) or in a commit message on
+  # the PR, in the style of git trailers / Gerrit's Depends-On. The most
+  # recent commit wins when several carry the directive.
+  def chain_directive(pr)
+    body_match = pr.body.to_s.match(CHAIN_DIRECTIVE_RE)
+    return body_match[1] if body_match
+
+    @github.pull_request_commits(repo_path, pr_number).reverse_each do |c|
+      match = c.commit.message.to_s.match(CHAIN_DIRECTIVE_RE)
+      return match[1] if match
+    end
+    nil
+  end
+
+  # A chain value is either a free-form name or a PR reference (full URL or
+  # [org/]repo#123, Gerrit Depends-On style). References are canonicalized to
+  # 'repo-123' so every PR pointing at the same upstream lands on the same
+  # chef-repo branch regardless of which form was used.
+  def normalize_chain(value)
+    return nil if value.nil? || value.empty?
+
+    match = CHAIN_PR_URL_RE.match(value) || CHAIN_PR_REF_RE.match(value)
+    return "#{match[1]}-#{match[2]}" if match
+
+    value
+  end
+
+  # Releasing is far more privileged than labelling: it merges the PR, pushes
+  # a tag to the base branch and freezes a version on the Chef server. GitHub
+  # grants labelling to triage users who cannot merge or push, so require push
+  # access explicitly for BOTH the label and the comment path rather than
+  # trusting the label event itself.
+  def authorize_actor!
+    raise Error, 'Cannot determine who requested this bump.' if actor.nil? || actor.empty?
+
+    level = begin
+      @github.permission_level(repo_path, actor).permission
+    rescue Octokit::NotFound
+      'none' # not a collaborator at all
+    end
     return if %w(admin write).include?(level)
 
-    raise Error, "user '#{actor}' is not authorized to bump via comment (needs write access)."
+    raise Error, "user '#{actor}' is not authorized to release #{repo_name} (needs write access)."
+  end
+
+  # Guard against a forged payload naming a repo we should never touch.
+  def verify_repo_in_org!
+    org = @env.fetch('GITHUB_ORG')
+    return if repo_path.to_s.start_with?("#{org}/")
+
+    raise Error, "refusing to act on '#{repo_path}': not in the '#{org}' organization."
   end
 
   def fetch_pr
@@ -269,12 +345,16 @@ class CookbookBumper
                 '-m', @env.fetch('LOCAL_SUPERMARKET_URL', 'https://supermarket.osuosl.org'), '-o', parent)
   end
 
-  def announce(pr, request, version, community)
+  def announce(pr, request, version, community, community_error = nil)
     message = "Jenkins has merged this PR into `#{pr.base.ref}` and performed a " \
               "#{request[:level]}-level version bump to v#{version}."
     unless community.empty?
       uploads = community.map { |c| "#{c[:name]} #{c[:version]}" }.join(', ')
       message += " Community cookbooks uploaded: #{uploads}."
+    end
+    if community_error
+      message += ' :warning: Community dependency upload failed and needs a manual check: ' \
+                 "`#{community_error.message}`."
     end
     message += " Environment bump queued for: #{request[:envs].join(', ')}." unless request[:envs].empty?
     message += " Chained into `#{request[:chain]}`." if request[:chain]

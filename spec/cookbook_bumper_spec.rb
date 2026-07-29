@@ -13,6 +13,8 @@ RSpec.describe CookbookBumper do
     }
   end
   let(:pr_labels) { [] }
+  let(:pr_body) { 'Adds TLS support to the vhost config.' }
+  let(:pr_commits) { [] }
   let(:base_ref) { 'master' }
   let(:pull_request) do
     double(
@@ -22,16 +24,20 @@ RSpec.describe CookbookBumper do
       html_url: 'https://github.com/osuosl-cookbooks/osl-apache/pull/42',
       base: double(ref: base_ref),
       head: double(ref: 'feature-tls', repo: double(full_name: 'osuosl-cookbooks/osl-apache')),
-      labels: pr_labels
+      labels: pr_labels,
+      body: pr_body
     )
   end
+  let(:permission) { 'write' }
   let(:github) do
     double(
       'github',
       pull_request: pull_request,
+      pull_request_commits: pr_commits,
       merge_pull_request: true,
       delete_branch: true,
-      add_comment: true
+      add_comment: true,
+      permission_level: double(permission: permission)
     )
   end
   let(:repo) do
@@ -124,15 +130,62 @@ RSpec.describe CookbookBumper do
       end
     end
 
-    context 'with a chain label' do
-      let(:pr_labels) do
-        [double(name: 'bump/minor'), double(name: 'chain/postfix-refactor'), double(name: 'env/default')]
-      end
+    context 'with a Chain: directive in the PR body' do
+      let(:pr_labels) { [double(name: 'bump/minor'), double(name: 'env/default')] }
+      let(:pr_body) { "Part of the postfix update.\n\nCookbook-Chain: postfix-refactor" }
 
       it 'carries the chain name into the result' do
         result = bumper(payload).run
         expect(result['chain']).to eq('postfix-refactor')
         expect(result['envs']).to eq('default')
+      end
+    end
+
+    context 'with a Chain: directive in a commit message' do
+      let(:pr_commits) do
+        [
+          double(commit: double(message: 'Fix vhost template')),
+          double(commit: double(message: "Update relay config\n\nCookbook-Chain: postfix-refactor")),
+        ]
+      end
+
+      it 'picks up the chain from the commits when the body has none' do
+        expect(bumper(payload).run['chain']).to eq('postfix-refactor')
+      end
+    end
+
+    context 'with directives in both the body and a commit' do
+      let(:pr_body) { 'Cookbook-Chain: from-body' }
+      let(:pr_commits) { [double(commit: double(message: 'Cookbook-Chain: from-commit'))] }
+
+      it 'prefers the PR body' do
+        expect(bumper(payload).run['chain']).to eq('from-body')
+      end
+    end
+
+    # Gerrit Depends-On style: pointing at the upstream PR instead of
+    # inventing a name. All reference forms canonicalize to the same key.
+    context 'with a PR reference as the chain value' do
+      let(:pr_body) { 'Cookbook-Chain: https://github.com/osuosl-cookbooks/osl-postfix/pull/123' }
+
+      it 'canonicalizes a full PR URL' do
+        expect(bumper(payload).run['chain']).to eq('osl-postfix-123')
+      end
+    end
+
+    context 'with a short PR reference as the chain value' do
+      let(:pr_body) { 'Cookbook-Chain: osl-postfix#123' }
+
+      it 'canonicalizes repo#number' do
+        expect(bumper(payload).run['chain']).to eq('osl-postfix-123')
+      end
+    end
+
+    context 'with an org-qualified PR reference as the chain value' do
+      let(:pr_body) { 'Cookbook-Chain: osuosl-cookbooks/osl-postfix#123' }
+
+      it 'canonicalizes org/repo#number to the same key' do
+        expect(bumper(payload).run['chain']).to eq('osl-postfix-123')
       end
     end
 
@@ -163,6 +216,42 @@ RSpec.describe CookbookBumper do
       end
     end
 
+    # Applying a label needs only triage on GitHub, which does not grant merge
+    # or push; releasing must require write access on both trigger paths.
+    context 'when the labeller lacks write access' do
+      let(:permission) { 'read' }
+
+      it 'refuses before merging' do
+        expect { bumper(payload).run }.to raise_error(CookbookBumper::Error, /not authorized/)
+        expect(github).not_to have_received(:merge_pull_request)
+      end
+    end
+
+    context 'when the labeller is not a collaborator at all' do
+      before do
+        allow(github).to receive(:permission_level).and_raise(Octokit::NotFound.new(status: 404))
+      end
+
+      it 'refuses before merging' do
+        expect { bumper(payload).run }.to raise_error(CookbookBumper::Error, /not authorized/)
+        expect(github).not_to have_received(:merge_pull_request)
+      end
+    end
+
+    context 'with a forged payload naming a repo outside the org' do
+      let(:payload) do
+        json_fixture('labeled_payload.json').tap do |p|
+          p['repository']['full_name'] = 'attacker/evil'
+        end
+      end
+
+      it 'refuses before touching GitHub' do
+        expect { bumper(payload).run }
+          .to raise_error(CookbookBumper::Error, /not in the 'osuosl-cookbooks' organization/)
+        expect(github).not_to have_received(:merge_pull_request)
+      end
+    end
+
     context 'when the PR has conflicts' do
       before { allow(pull_request).to receive(:mergeable).and_return(false) }
 
@@ -179,6 +268,30 @@ RSpec.describe CookbookBumper do
       it 'includes them in the result cookbooks' do
         expect(bumper(payload).run['cookbooks']).to include('name' => 'postfix', 'version' => '6.1.8')
       end
+    end
+
+    # The release is already published by this point and cannot be retried,
+    # so a community upload failure must not swallow the environment bump.
+    context 'when a community dependency upload fails' do
+      before do
+        allow(community_deps).to receive(:call).and_raise(StandardError, 'cookbook is frozen')
+      end
+
+      it 'still finishes the release and queues the environment bump' do
+        result = bumper(payload).run
+        expect(result['cookbooks']).to eq([{ 'name' => 'osl-apache', 'version' => '2.4.0' }])
+        expect(File).to exist(env['RESULT_FILE'])
+      end
+
+      it 'reports the failure on the PR' do
+        bumper(payload).run
+        expect(github).to have_received(:add_comment)
+          .with('osuosl-cookbooks/osl-apache', 42, /Community dependency upload failed.*cookbook is frozen/m)
+      end
+    end
+
+    it 'emits chain as a string so Jenkins readJSON cannot turn nil into "null"' do
+      expect(bumper(payload).run['chain']).to eq('')
     end
   end
 

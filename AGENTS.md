@@ -13,23 +13,50 @@ cookbook via JCasC job-dsl.
   label lives here — switch it in one place to move CI into Docker agents.
 - `pipelines/cookbook-uploader.Jenkinsfile` — single webhook-driven release
   pipeline for all cookbook repos. Triggered by `bump/major|minor|patch`
-  labels (primary; authorization is GitHub-native, triage+) or a
-  `!bump <level> [envs=a,b] [chain=name]` comment (fallback; needs write
-  access). Runs `bin/cookbook_bumper.rb`, then hands off to the
-  environment-bumper job.
+  labels; releasing requires GitHub write access (checked via the API for
+  both trigger paths). A `!bump <level> [envs=a,b] [chain=name]` comment
+  fallback exists but stays unwired until cutover. Runs
+  `bin/cookbook_bumper.rb`, then hands off to the environment-bumper job.
+- Chained bumps: a `Cookbook-Chain: <value>` line in the PR description
+  (preferred) or a commit message accumulates several related releases into
+  one chef-repo PR on `jenkins/chain-<key>`. The value is either a free-form
+  name shared by every PR in the series, or — Gerrit `Depends-On` style — a
+  reference to the upstream PR (`osl-postfix#123` or its full URL), which all
+  canonicalize to the same key (`osl-postfix-123`). The upstream PR
+  self-references to join its own chain. Grouping only: nothing enforces
+  merge order or co-tests the PRs. There are deliberately no `chain/*`
+  labels — GitHub labels are per-repo, so free-form names would mean endless
+  label churn.
 - `pipelines/environment-bumper.Jenkinsfile` — parameterized job that pins
   versions in chef-repo `environments/*.json` and opens/updates a PR. Supports
-  multi-cookbook pins and chains (`chain=<name>` accumulates several bumps
-  into one chef-repo PR on `jenkins/chain-<name>`).
+  multi-cookbook pins and chains via its `chain` parameter.
+- `pipelines/github-sync.Jenkinsfile` + `lib/github_sync.rb` — scheduled
+  (every 30 min + on-demand) reconciliation of GitHub-side state: seeds `bump/*` and
+  `env/*` labels and the uploader webhook in every non-archived org repo,
+  and removes the legacy webhooks (per-repo uploader hook, GHPRB
+  `/ghprbhook/`) from repos that have a Jenkinsfile, i.e. have migrated.
+  Deliberately not part of the chef converge. Supports `DRY_RUN` and a `REPOS`
+  canary list; also restricts default-branch merges to the bot account
+  (PROTECT_BRANCHES) so PRs cannot be merged manually. Per-repo failures mark
+  the build UNSTABLE, not failed. Needs the out-of-band
+  `cookbook_uploader_trigger` secret-text credential.
 - `lib/` + `bin/` — the Ruby implementation. `lib/` classes are dependency-
   injected and unit-tested; `bin/` wrappers only wire ENV/stdin to them.
 - `spec/` — RSpec with webhook payload fixtures in `spec/fixtures/`.
 
 ## Conventions and constraints
 
-- **Ruby 3.1** (rvm: `ruby-3.1.7@cookbook-pipelines`). Gems must stay
-  resolvable on 3.1 for Cinc 18.x compatibility — don't bump `octokit`/`git`
-  to versions requiring newer Ruby.
+- **Ruby comes from cinc-workstation, not bundler.** The pipelines run
+  `/opt/cinc-workstation/embedded/bin/ruby` on the Jenkins controller. That
+  omnibus already ships ruby 3.4, `octokit`, `git` and `faraday-http-cache`,
+  and it is where `knife` comes from — so nothing is installed at release
+  time and there is no `bundle install` in any pipeline.
+- The Gemfile pins those three gems to the exact versions cinc-workstation
+  ships so CI exercises what production runs. Bump them only when
+  cinc-workstation itself moves, and update `.ruby-version` / rubocop's
+  `TargetRubyVersion` / the CI matrix together.
+- Local dev uses rvm (`ruby-3.4.5@cookbook-pipelines`) purely to run the
+  tests; bundler is a dev/test tool here, never a runtime one.
 - **Branch-agnostic**: never hardcode `master`/`main`. Cookbook operations use
   the PR's `base.ref`; chef-repo operations resolve `default_branch` from the
   GitHub API. Specs cover both names.
@@ -40,10 +67,16 @@ cookbook via JCasC job-dsl.
 
 ## Running tests
 
-```
-rvm use ruby-3.1.7@cookbook-pipelines
+```sh
+rvm use ruby-3.4.5@cookbook-pipelines --create
 bundle install
 bundle exec rake        # rubocop + rspec (same entrypoint CI uses)
+```
+
+To smoke-test against the ruby production actually uses:
+
+```sh
+/opt/cinc-workstation/embedded/bin/ruby -Ilib -e 'require "cookbook_bumper"'
 ```
 
 ## How changes ship

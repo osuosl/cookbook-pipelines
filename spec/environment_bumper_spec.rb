@@ -149,4 +149,58 @@ RSpec.describe EnvironmentBumper do
     expect { bumper('cookbooks' => 'nonsense').run }
       .to raise_error(EnvironmentBumper::Error, /malformed cookbook pin/)
   end
+
+  # Explicitly named environments may gain NEW pins (e.g. a freshly added
+  # community dependency); 'all' is update-only so one label cannot introduce
+  # a cookbook everywhere.
+  context 'when a requested cookbook is not yet pinned' do
+    it 'adds the pin in an explicitly named environment' do
+      bumper('cookbooks' => 'osl-postfix:2.1.0,brand-new-dep:3.2.0', 'envs' => 'production').run
+      pins = environment('production')['cookbook_versions']
+      expect(pins['brand-new-dep']).to eq('= 3.2.0')
+      expect(repo).to have_received(:commit)
+        .with(/osl-postfix to v2\.1\.0, brand-new-dep to v3\.2\.0/)
+    end
+
+    it 'calls out newly added pins in the PR body' do
+      bumper('cookbooks' => 'osl-postfix:2.1.0,brand-new-dep:3.2.0', 'envs' => 'production').run
+      expect(github).to have_received(:create_pull_request)
+        .with('osuosl/chef-repo', 'master', anything, anything,
+              /Newly pinned.*brand-new-dep 3\.2\.0 in: production/m)
+    end
+
+    it 'does not add pins under env all, and flags the skip' do
+      bumper('cookbooks' => 'osl-postfix:2.1.0,brand-new-dep:3.2.0', 'envs' => 'all').run
+      expect(environment('production')['cookbook_versions']).not_to have_key('brand-new-dep')
+      expect(repo).to have_received(:commit).with(/\Aautomatic version bump of osl-postfix to v2\.1\.0 by jenkins/i)
+      expect(github).to have_received(:create_pull_request)
+        .with('osuosl/chef-repo', 'master', anything, "Bump 'osl-postfix' to 2.1.0",
+              /left unchanged: brand-new-dep/)
+    end
+
+    it 'treats an explicitly named env as addable even when all is also selected' do
+      bumper('cookbooks' => 'brand-new-dep:3.2.0', 'envs' => 'all,production').run
+      expect(environment('production')['cookbook_versions']['brand-new-dep']).to eq('= 3.2.0')
+      expect(environment('staging')['cookbook_versions']).not_to have_key('brand-new-dep')
+    end
+  end
+
+  # Re-running the same non-chain bump force-pushes the same content-addressed
+  # branch; creating a second PR for it would fail with a 422.
+  context 'when re-run for a non-chain branch that already has an open PR' do
+    let(:remote_branches) { [double(remote: true, name: 'jenkins/osl-postfix-2.1.0-abcdef1')] }
+    let(:open_pr) do
+      double(number: 77, body: 'body', html_url: 'https://github.com/osuosl/chef-repo/pull/77')
+    end
+
+    before do
+      allow(github).to receive(:pull_requests).and_return([open_pr])
+    end
+
+    it 'updates the existing PR instead of creating a duplicate' do
+      bumper.run
+      expect(github).not_to have_received(:create_pull_request)
+      expect(github).to have_received(:add_comment).with('osuosl/chef-repo', 77, /Added bump of/)
+    end
+  end
 end

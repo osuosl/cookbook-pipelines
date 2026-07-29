@@ -23,7 +23,7 @@ RSpec.describe GithubSync do
   let(:repo_hooks) { [] }
   let(:protection) { nil }
   let(:migrated) { false }
-  let(:delete_branch_on_merge) { false }
+  let(:repo_settings) { {} }
   let(:repo_teams) { [] }
   let(:github) do
     github = double(
@@ -32,8 +32,7 @@ RSpec.describe GithubSync do
         double(name: 'osl-apache', archived?: false, default_branch: 'master'),
         double(name: 'old-thing', archived?: true, default_branch: 'master'),
       ],
-      repository: double(default_branch: 'master',
-                         to_h: { delete_branch_on_merge: delete_branch_on_merge }),
+      repository: double(default_branch: 'master', to_h: repo_settings),
       add_label: true, create_hook: true, edit_hook: true, protect_branch: true,
       remove_hook: true, put: true, edit_repository: true,
       repository_teams: repo_teams
@@ -219,19 +218,39 @@ RSpec.describe GithubSync do
   end
 
   describe 'repo settings' do
-    it 'enables delete_branch_on_merge' do
+    it 'enables branch auto-delete, rebase merges and branch updates' do
       result = sync.run
-      expect(github).to have_received(:edit_repository)
-        .with('osuosl-cookbooks/osl-apache', delete_branch_on_merge: true)
+      expect(github).to have_received(:edit_repository).with(
+        'osuosl-cookbooks/osl-apache',
+        delete_branch_on_merge: true, allow_rebase_merge: true, allow_update_branch: true
+      )
       expect(result[:stats][:settings_updated]).to eq(1)
     end
 
-    context 'when it is already enabled' do
-      let(:delete_branch_on_merge) { true }
+    it 'leaves merge commits enabled - PRs still land as merge commits' do
+      sync.run
+      expect(github).to have_received(:edit_repository)
+        .with('osuosl-cookbooks/osl-apache', hash_excluding(:allow_merge_commit))
+    end
+
+    context 'when they are already set' do
+      let(:repo_settings) do
+        { delete_branch_on_merge: true, allow_rebase_merge: true, allow_update_branch: true }
+      end
 
       it 'issues no write' do
         sync.run
         expect(github).not_to have_received(:edit_repository)
+      end
+    end
+
+    context 'when only one setting drifted' do
+      let(:repo_settings) { { delete_branch_on_merge: true, allow_rebase_merge: true } }
+
+      it 'writes just that key' do
+        sync.run
+        expect(github).to have_received(:edit_repository)
+          .with('osuosl-cookbooks/osl-apache', allow_update_branch: true)
       end
     end
   end
@@ -275,6 +294,69 @@ RSpec.describe GithubSync do
       end
     end
 
+    # 'strict' is GitHub's "require branches to be up to date before merging".
+    # It only applies alongside required contexts, so migrated repos get the
+    # org folder's check required and the legacy GHPRB context dropped.
+    context 'on a migrated repo' do
+      let(:migrated) { true }
+
+      it 'requires up-to-date branches against the org folder check' do
+        sync.run
+        expect(github).to have_received(:protect_branch).with(
+          'osuosl-cookbooks/osl-apache', 'master',
+          hash_including(
+            required_status_checks: {
+              strict: true, contexts: ['continuous-integration/jenkins/pr-merge'],
+            }
+          )
+        )
+      end
+
+      context 'that still requires the legacy linter check' do
+        let(:protection) do
+          double(
+            enforce_admins: double(enabled: false),
+            restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
+            required_status_checks: double(strict: false, contexts: ['chef-ci-linter-osl-apache']),
+            required_pull_request_reviews: nil
+          )
+        end
+
+        it 'swaps the legacy context for the new one' do
+          sync.run
+          expect(github).to have_received(:protect_branch).with(
+            'osuosl-cookbooks/osl-apache', 'master',
+            hash_including(
+              required_status_checks: {
+                strict: true, contexts: ['continuous-integration/jenkins/pr-merge'],
+              }
+            )
+          )
+        end
+      end
+    end
+
+    context 'on an unmigrated repo with its own required check' do
+      let(:protection) do
+        double(
+          enforce_admins: double(enabled: false),
+          restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
+          required_status_checks: double(strict: false, contexts: ['chef-ci-linter-osl-apache']),
+          required_pull_request_reviews: nil
+        )
+      end
+
+      it 'keeps the legacy context but still requires up-to-date branches' do
+        sync.run
+        expect(github).to have_received(:protect_branch).with(
+          'osuosl-cookbooks/osl-apache', 'master',
+          hash_including(
+            required_status_checks: { strict: true, contexts: ['chef-ci-linter-osl-apache'] }
+          )
+        )
+      end
+    end
+
     context 'when protection is already correct' do
       let(:protection) do
         double(
@@ -306,7 +388,7 @@ RSpec.describe GithubSync do
       expect(github).not_to have_received(:create_hook)
       expect(github).not_to have_received(:protect_branch)
       expect(out.string).to include("DRY RUN: would create label 'bump/major'")
-      expect(out.string).to include('DRY RUN: would restrict merges')
+      expect(out.string).to include('DRY RUN: would protect osuosl-cookbooks/osl-apache@master')
       expect(result[:stats][:labels_created]).to eq(8)
     end
   end

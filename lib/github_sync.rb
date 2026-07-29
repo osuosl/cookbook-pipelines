@@ -57,6 +57,21 @@ class GithubSync
     'staff' => 'push',
   }.freeze
 
+  # Repo settings kept in sync. Merge commits stay enabled - that is how PRs
+  # land - but PR branches themselves must stay linear, which GitHub has no
+  # setting for; oslCookbookCI fails a PR whose branch contains a merge
+  # commit, and 'strict' protection below forces it to be up to date, so the
+  # only way to satisfy both is a rebase.
+  DESIRED_REPO_SETTINGS = {
+    delete_branch_on_merge: true,
+    allow_rebase_merge: true,
+    allow_update_branch: true,
+  }.freeze
+
+  # The org folder's PR check. Required on migrated repos, which also retires
+  # the legacy GHPRB context so nobody has to swap it by hand.
+  LEGACY_CHECK_RE = /\Achef-ci-linter-/
+
   def self.from_env
     new
   end
@@ -123,13 +138,18 @@ class GithubSync
 
   def sync_repo(repo_name, stats)
     repo_path = "#{org}/#{repo_name}"
+    migrated = migrated?(repo_path)
     seed_labels(repo_path, stats)
     hooks = @github.hooks(repo_path)
     ensure_hook(repo_path, hooks, stats)
-    remove_legacy_hooks(repo_path, repo_name, hooks, stats)
+    remove_legacy_hooks(repo_path, repo_name, hooks, migrated, stats)
     ensure_teams(repo_path, stats)
     ensure_repo_settings(repo_name, repo_path, stats)
-    ensure_branch_protection(repo_name, repo_path, stats)
+    ensure_branch_protection(repo_name, repo_path, migrated, stats)
+  end
+
+  def required_check
+    @env.fetch('REQUIRED_CHECK', 'continuous-integration/jenkins/pr-merge')
   end
 
   # Grant the standing team access. Only writes when a team is missing or has
@@ -146,12 +166,14 @@ class GithubSync
     end
   end
 
-  # Delete the source branch automatically once a PR merges.
+  # Keep the merge/branch settings in sync; only writes the keys that drifted.
   def ensure_repo_settings(repo_name, repo_path, stats)
-    return if repo_info(repo_name).to_h[:delete_branch_on_merge]
+    current = repo_info(repo_name).to_h
+    drift = DESIRED_REPO_SETTINGS.reject { |key, value| current[key] == value }
+    return if drift.empty?
 
-    act("enable delete_branch_on_merge on #{repo_path}") do
-      @github.edit_repository(repo_path, delete_branch_on_merge: true)
+    act("update settings on #{repo_path} (#{drift.keys.join(', ')})") do
+      @github.edit_repository(repo_path, **drift)
     end
     stats[:settings_updated] += 1
   end
@@ -215,8 +237,8 @@ class GithubSync
   # old per-repo freestyle uploader job, and the /ghprbhook/ hook the GHPRB
   # plugin registered for the hand-made linter jobs. (The legacy job config
   # itself is chef-managed and removed by the osl-jenkins cookbook.)
-  def remove_legacy_hooks(repo_path, repo_name, hooks, stats)
-    return unless migrated?(repo_path)
+  def remove_legacy_hooks(repo_path, repo_name, hooks, migrated, stats)
+    return unless migrated
 
     legacy_job = "cookbook-uploader-#{org}-#{repo_name}"
     hooks.each do |hook|
@@ -254,7 +276,7 @@ class GithubSync
   # carried forward unchanged; only the push restriction and enforce_admins
   # are overlaid. Never turn this into a blind PUT - authoritative-on-apply
   # APIs have burned us before.
-  def ensure_branch_protection(repo_name, repo_path, stats)
+  def ensure_branch_protection(repo_name, repo_path, migrated, stats)
     return unless @env.fetch('PROTECT_BRANCHES', 'true') == 'true'
 
     branch = repo_info(repo_name).default_branch
@@ -266,28 +288,54 @@ class GithubSync
       nil
     end
 
-    if protection_current?(existing, bot)
+    desired = protection_request(existing, bot, migrated: migrated)
+    if protection_current?(existing, desired, bot)
       stats[:protection_current] += 1
       return
     end
 
-    act("restrict merges on #{repo_path}@#{branch} to #{bot}") do
-      @github.protect_branch(repo_path, branch, protection_request(existing, bot))
+    act("protect #{repo_path}@#{branch} (merges restricted to #{bot}, up-to-date branches required)") do
+      @github.protect_branch(repo_path, branch, desired)
     end
     stats[:protection_updated] += 1
   end
 
-  def protection_current?(existing, bot)
+  def protection_current?(existing, desired, bot)
     return false if existing.nil?
 
     users = (existing.restrictions&.users || []).map(&:login)
-    users == [bot] && existing.enforce_admins&.enabled == false
+    return false unless users == [bot] && existing.enforce_admins&.enabled == false
+
+    checks_current?(existing.required_status_checks, desired[:required_status_checks])
+  end
+
+  def checks_current?(existing_checks, desired_checks)
+    return existing_checks.nil? if desired_checks.nil?
+    return false if existing_checks.nil?
+
+    existing_checks.strict == desired_checks[:strict] &&
+      existing_checks.contexts.to_a.sort == desired_checks[:contexts].sort
+  end
+
+  # 'strict' is what makes GitHub require an up-to-date branch before merging.
+  # It only has meaning alongside required contexts, so on migrated repos the
+  # org folder's PR check is required and the legacy GHPRB context dropped -
+  # that retires the old check without the manual swap that would otherwise
+  # block every PR if done in the wrong order.
+  def required_status_checks(existing, migrated:)
+    contexts = (existing&.required_status_checks&.contexts || []).to_a
+    if migrated
+      contexts = contexts.grep_v(LEGACY_CHECK_RE)
+      contexts |= [required_check]
+    end
+    return nil if contexts.empty?
+
+    { strict: true, contexts: contexts }
   end
 
   # Build the full PUT body: desired restriction + everything the repo
   # already had. All four top-level keys are mandatory on this endpoint.
-  def protection_request(existing, bot)
-    checks = existing&.required_status_checks
+  def protection_request(existing, bot, migrated:)
     reviews = existing&.required_pull_request_reviews
     {
       # False on purpose: admins keep a manual merge escape hatch. See
@@ -297,10 +345,7 @@ class GithubSync
         users: [bot],
         teams: (existing&.restrictions&.teams || []).map(&:slug),
       },
-      required_status_checks: checks && {
-        strict: checks.strict,
-        contexts: checks.contexts.to_a,
-      },
+      required_status_checks: required_status_checks(existing, migrated: migrated),
       required_pull_request_reviews: reviews && {
         dismiss_stale_reviews: reviews.dismiss_stale_reviews,
         require_code_owner_reviews: reviews.require_code_owner_reviews,

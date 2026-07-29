@@ -102,7 +102,7 @@ class CookbookBumper
 
     # bump/skip: merge only, no version bump, upload or environment bump.
     if request[:level] == SKIP
-      @github.merge_pull_request(repo_path, pr_number)
+      merge!
       delete_source_branch(pr)
       @github.add_comment(repo_path, pr_number,
                           'Merged without a release (`bump/skip`): no version bump, upload or environment change.')
@@ -116,7 +116,7 @@ class CookbookBumper
     request[:chain] ||= chain_directive(pr)
     request[:chain] = normalize_chain(request[:chain])
 
-    @github.merge_pull_request(repo_path, pr_number)
+    merge!
     delete_source_branch(pr)
 
     version = release(pr)
@@ -274,6 +274,10 @@ class CookbookBumper
 
   def fetch_pr
     @github.pull_request(repo_path, pr_number)
+  end
+
+  def merge!
+    @github.merge_pull_request(repo_path, pr_number)
   end
 
   # GitHub computes mergeability lazily; 'unknown' means "not done yet".

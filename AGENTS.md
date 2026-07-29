@@ -11,6 +11,11 @@ cookbook via JCasC job-dsl.
   Every cookbook repo carries a one-line Jenkinsfile calling `oslCookbookCI()`;
   a GitHub Organization Folder on the Jenkins side discovers them. The agent
   label lives here — switch it in one place to move CI into Docker agents.
+  On PRs it also fails the build if the branch contains merge commits: GitHub
+  can't forbid merge-updates without also forbidding the merge commit we want
+  when the PR lands, so this check plus `strict` protection leaves rebase as
+  the only way to refresh a stale branch. It inspects `refs/pull/<id>/head`,
+  not the workspace HEAD, which is Jenkins' own merge of PR into target.
 - `pipelines/cookbook-uploader.Jenkinsfile` — single webhook-driven release
   pipeline for all cookbook repos. Triggered by `bump/major|minor|patch`
   labels; releasing requires GitHub write access (checked via the API for
@@ -35,8 +40,10 @@ cookbook via JCasC job-dsl.
   (incl. `bump/skip`) and `env/*` labels and the uploader webhook in every
   non-archived org repo, removes the legacy webhooks (per-repo uploader hook,
   GHPRB `/ghprbhook/`) from repos that have a Jenkinsfile, grants the standing
-  team permissions (chefs/staff write, ci/core admin), and enables
-  `delete_branch_on_merge`.
+  team permissions (chefs/staff write, ci/core admin), keeps the repo merge
+  settings in sync, and requires up-to-date branches (`strict`) against the
+  org folder's PR check — which also retires the legacy `chef-ci-linter-*`
+  required context automatically.
   Deliberately not part of the chef converge. Supports `DRY_RUN` and a `REPOS`
   canary list; also restricts default-branch merges to the bot account
   (PROTECT_BRANCHES) so PRs cannot be merged manually. `enforce_admins` is

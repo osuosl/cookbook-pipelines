@@ -13,6 +13,7 @@ RSpec.describe CookbookBumper do
     }
   end
   let(:pr_labels) { [] }
+  let(:mergeable_state) { 'clean' }
   let(:pr_body) { 'Adds TLS support to the vhost config.' }
   let(:pr_commits) { [] }
   let(:base_ref) { 'master' }
@@ -21,14 +22,17 @@ RSpec.describe CookbookBumper do
       'pr',
       merged: false,
       mergeable: true,
+      mergeable_state: mergeable_state,
       html_url: 'https://github.com/osuosl-cookbooks/osl-apache/pull/42',
       base: double(ref: base_ref),
-      head: double(ref: 'feature-tls', repo: double(full_name: 'osuosl-cookbooks/osl-apache')),
+      head: double(ref: 'feature-tls', sha: 'abc123',
+                   repo: double(full_name: 'osuosl-cookbooks/osl-apache')),
       labels: pr_labels,
       body: pr_body
     )
   end
   let(:permission) { 'write' }
+  let(:commit_state) { 'success' }
   let(:github) do
     double(
       'github',
@@ -37,7 +41,8 @@ RSpec.describe CookbookBumper do
       merge_pull_request: true,
       delete_branch: true,
       add_comment: true,
-      permission_level: double(permission: permission)
+      permission_level: double(permission: permission),
+      combined_status: double(state: commit_state)
     )
   end
   let(:repo) do
@@ -253,10 +258,105 @@ RSpec.describe CookbookBumper do
     end
 
     context 'when the PR has conflicts' do
-      before { allow(pull_request).to receive(:mergeable).and_return(false) }
+      let(:mergeable_state) { 'dirty' }
 
       it 'refuses' do
-        expect { bumper(payload).run }.to raise_error(CookbookBumper::Error, /cannot be merged/)
+        expect { bumper(payload).run }.to raise_error(CookbookBumper::Error, /merge conflicts/)
+        expect(github).not_to have_received(:merge_pull_request)
+      end
+    end
+
+    # The bot holds admin so GitHub would let it bypass protection for anyone;
+    # for a non-admin labeller it must refuse instead of exploiting that.
+    context 'when branch protection blocks the PR and the labeller is not an admin' do
+      let(:mergeable_state) { 'blocked' }
+
+      it 'refuses with an actionable message and does not merge' do
+        expect { bumper(payload).run }
+          .to raise_error(CookbookBumper::Error, /blocked by branch protection.*approving review/m)
+        expect(github).not_to have_received(:merge_pull_request)
+      end
+    end
+
+    # An admin can merge a protected branch by hand, and cannot approve their
+    # own PR, so the label path has to honor that same bypass or admins could
+    # never release their own work.
+    context 'when branch protection blocks the PR but an admin applied the label' do
+      let(:mergeable_state) { 'blocked' }
+      let(:permission) { 'admin' }
+
+      it 'releases anyway when checks are green' do
+        result = bumper(payload).run
+        expect(github).to have_received(:merge_pull_request)
+        expect(result['cookbooks']).to eq([{ 'name' => 'osl-apache', 'version' => '2.4.0' }])
+      end
+
+      it 'records the bypass on the PR' do
+        bumper(payload).run
+        expect(github).to have_received(:add_comment)
+          .with('osuosl-cookbooks/osl-apache', 42, /admin bypass of branch protection/)
+      end
+
+      context 'but the checks are failing' do
+        let(:commit_state) { 'failure' }
+
+        it 'still refuses — the bypass does not cover red checks' do
+          expect { bumper(payload).run }
+            .to raise_error(CookbookBumper::Error, /checks are not passing/)
+          expect(github).not_to have_received(:merge_pull_request)
+        end
+      end
+
+      context 'and the checks have not finished' do
+        let(:commit_state) { 'pending' }
+
+        it 'waits rather than releasing' do
+          expect { bumper(payload).run }
+            .to raise_error(CookbookBumper::Error, /still unknown/)
+          expect(github).not_to have_received(:merge_pull_request)
+        end
+      end
+    end
+
+    context 'when the PR is behind its base branch' do
+      let(:mergeable_state) { 'behind' }
+
+      it 'refuses' do
+        expect { bumper(payload).run }.to raise_error(CookbookBumper::Error, /out of date/)
+      end
+    end
+
+    context 'when only non-required checks are failing' do
+      let(:mergeable_state) { 'unstable' }
+
+      it 'still releases' do
+        expect(bumper(payload).run['cookbooks']).to eq([{ 'name' => 'osl-apache', 'version' => '2.4.0' }])
+      end
+    end
+
+    # bump/skip: merge with no release at all.
+    context 'with the bump/skip label' do
+      let(:payload) { json_fixture('labeled_payload.json').merge('label' => { 'name' => 'bump/skip' }) }
+
+      it 'merges without releasing anything' do
+        expect(bumper(payload).run).to be_nil
+        expect(github).to have_received(:merge_pull_request).with('osuosl-cookbooks/osl-apache', 42)
+        expect(github).to have_received(:delete_branch)
+        expect(repo).not_to have_received(:add_tag)
+        expect(shell_calls).to be_empty
+        expect(File).not_to exist(env['RESULT_FILE'])
+      end
+
+      it 'says so on the PR' do
+        bumper(payload).run
+        expect(github).to have_received(:add_comment)
+          .with('osuosl-cookbooks/osl-apache', 42, /Merged without a release/)
+      end
+
+      it 'still requires write access' do
+        allow(github).to receive(:permission_level).and_return(double(permission: 'read'))
+        expect { bumper(payload).run }.to raise_error(CookbookBumper::Error, /not authorized/)
+        expect(github).not_to have_received(:merge_pull_request)
       end
     end
 

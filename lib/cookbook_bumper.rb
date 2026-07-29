@@ -13,6 +13,9 @@ require_relative 'github_helpers'
 # `env/<name>`, `env/default`, and `env/all` labels select the chef-repo
 # environments to pin.
 #
+# `bump/skip` merges the PR with no release at all, for changes that don't
+# affect production cookbook code.
+#
 # Chained bumps (several related releases accumulating into ONE chef-repo PR)
 # are requested with a `Cookbook-Chain: <name>` line in the PR description or
 # in a commit message on the PR - labels can't carry free-form names without
@@ -33,7 +36,13 @@ class CookbookBumper
   end
 
   LEVELS = %w(major minor patch).freeze
-  BUMP_LABEL_RE = %r{\Abump/(#{LEVELS.join('|')})\z}
+  # bump/skip merges the PR with no release: for changes that don't affect
+  # production cookbook code (CI config, docs, the migration Jenkinsfile).
+  SKIP = 'skip'.freeze
+  BUMP_LABEL_RE = %r{\Abump/(#{(LEVELS + [SKIP]).join('|')})\z}
+  # States a non-admin could merge. The bot holds admin and would bypass
+  # branch protection, so refuse anything else rather than exploiting that.
+  MERGEABLE_STATES = %w(clean unstable).freeze
   ENV_LABEL_RE = %r{\Aenv/(\S+)\z}
   # Matches a 'Cookbook-Chain: <value>' line in a PR body or commit message.
   CHAIN_DIRECTIVE_RE = /^cookbook-chain:[ \t]*(\S+)[ \t]*$/i
@@ -41,7 +50,7 @@ class CookbookBumper
   # free-form name: a full PR URL or [org/]repo#123.
   CHAIN_PR_URL_RE = %r{\Ahttps?://github\.com/[^/]+/([^/]+)/pull/(\d+)/?\z}i
   CHAIN_PR_REF_RE = %r{\A(?:[\w.-]+/)?([\w.-]+)#(\d+)\z}
-  COMMENT_RE = /\A!bump (#{LEVELS.join('|')})(\s.*)?\z/
+  COMMENT_RE = /\A!bump (#{(LEVELS + [SKIP]).join('|')})(\s.*)?\z/
   METADATA_FILE = 'metadata.rb'.freeze
   CHANGELOG_FILE = 'CHANGELOG.md'.freeze
   VERSION_RE = /^(version\s+)(["'])(\d+\.\d+\.\d+)\2$/
@@ -91,13 +100,23 @@ class CookbookBumper
     authorize_actor!
     pr = wait_for_mergeable(pr)
 
+    # bump/skip: merge only, no version bump, upload or environment bump.
+    if request[:level] == SKIP
+      merge!
+      delete_source_branch(pr)
+      @github.add_comment(repo_path, pr_number,
+                          'Merged without a release (`bump/skip`): no version bump, upload or environment change.')
+      @out.puts 'Merged with bump/skip; no release performed.'
+      return nil
+    end
+
     request = merge_labels_into(request, pr) if request[:source] == :label
     # An explicit chain= from the comment fallback wins; otherwise honor a
     # 'Cookbook-Chain: <value>' directive in the PR body or a commit message.
     request[:chain] ||= chain_directive(pr)
     request[:chain] = normalize_chain(request[:chain])
 
-    @github.merge_pull_request(repo_path, pr_number)
+    merge!
     delete_source_branch(pr)
 
     version = release(pr)
@@ -239,11 +258,7 @@ class CookbookBumper
   def authorize_actor!
     raise Error, 'Cannot determine who requested this bump.' if actor.nil? || actor.empty?
 
-    level = begin
-      @github.permission_level(repo_path, actor).permission
-    rescue Octokit::NotFound
-      'none' # not a collaborator at all
-    end
+    level = actor_permission
     return if %w(admin write).include?(level)
 
     raise Error, "user '#{actor}' is not authorized to release #{repo_name} (needs write access)."
@@ -261,16 +276,88 @@ class CookbookBumper
     @github.pull_request(repo_path, pr_number)
   end
 
-  # GitHub computes mergeability lazily; nil means "not done yet".
+  def merge!
+    @github.merge_pull_request(repo_path, pr_number)
+  end
+
+  # GitHub computes mergeability lazily; 'unknown' means "not done yet".
+  # Checking mergeable_state (not just mergeable) stops the bot from silently
+  # spending its own admin bypass on everyone's behalf.
   def wait_for_mergeable(pr)
     MERGEABLE_ATTEMPTS.times do
-      return pr if pr.mergeable
-      raise Error, 'PR cannot be merged cleanly.' if pr.mergeable == false
+      verdict = mergeability(pr)
+      return pr if verdict == :ok
+      raise Error, verdict if verdict.is_a?(String)
 
-      @sleeper.call(2)
+      @sleeper.call(2) # :retry
       pr = fetch_pr
     end
     raise Error, 'PR mergeability is still unknown, try again.'
+  end
+
+  # :ok, :retry, or an error message.
+  def mergeability(pr)
+    state = pr.mergeable_state.to_s
+    return :ok if MERGEABLE_STATES.include?(state)
+    return :retry if state.empty? || state == 'unknown'
+    return blocked_verdict(pr) if state == 'blocked'
+
+    mergeable_error(state)
+  end
+
+  # A repo admin can merge a protected branch by hand, so honor that same
+  # bypass for the admin who applied the label - otherwise an admin could
+  # never release their own PR (GitHub forbids self-approval). The bypass
+  # covers the REVIEW requirement only: a red or unfinished check still stops
+  # the release, since that would publish a frozen version that failed CI.
+  def blocked_verdict(pr)
+    return mergeable_error('blocked') unless admin_actor?
+
+    case commit_state(pr)
+    when 'success'
+      @review_waived = true
+      @out.puts "Branch protection waived for admin '#{actor}' (checks are green)."
+      :ok
+    when 'pending'
+      :retry
+    else
+      "PR is blocked and its checks are not passing (#{commit_state(pr)}); " \
+      'an admin bypass does not cover failing checks.'
+    end
+  end
+
+  # Combined commit status for the PR head. Jenkins reports via the statuses
+  # API; if the org ever switches to the Checks API this needs to consider
+  # check-runs too.
+  def commit_state(pr)
+    @commit_state ||= @github.combined_status(repo_path, pr.head.sha).state.to_s
+  end
+
+  def actor_permission
+    @actor_permission ||= begin
+      @github.permission_level(repo_path, actor).permission
+    rescue Octokit::NotFound
+      'none' # not a collaborator at all
+    end
+  end
+
+  def admin_actor?
+    actor_permission == 'admin'
+  end
+
+  def mergeable_error(state)
+    case state
+    when 'dirty'
+      'PR has merge conflicts.'
+    when 'blocked'
+      'PR is blocked by branch protection: it needs an approving review and/or passing required checks.'
+    when 'behind'
+      'PR is out of date with its base branch; update the branch first.'
+    when 'draft'
+      'PR is still a draft.'
+    else
+      "PR is not in a mergeable state (#{state})."
+    end
   end
 
   def delete_source_branch(pr)
@@ -358,6 +445,10 @@ class CookbookBumper
     end
     message += " Environment bump queued for: #{request[:envs].join(', ')}." unless request[:envs].empty?
     message += " Chained into `#{request[:chain]}`." if request[:chain]
+    if @review_waived
+      message += " :key: Merged using #{actor}'s admin bypass of branch protection " \
+                 '(required checks were green).'
+    end
     @github.add_comment(repo_path, pr_number, message)
   end
 

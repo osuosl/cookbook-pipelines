@@ -25,12 +25,14 @@ RSpec.describe CookbookBumper do
       mergeable_state: mergeable_state,
       html_url: 'https://github.com/osuosl-cookbooks/osl-apache/pull/42',
       base: double(ref: base_ref),
-      head: double(ref: 'feature-tls', repo: double(full_name: 'osuosl-cookbooks/osl-apache')),
+      head: double(ref: 'feature-tls', sha: 'abc123',
+                   repo: double(full_name: 'osuosl-cookbooks/osl-apache')),
       labels: pr_labels,
       body: pr_body
     )
   end
   let(:permission) { 'write' }
+  let(:commit_state) { 'success' }
   let(:github) do
     double(
       'github',
@@ -39,7 +41,8 @@ RSpec.describe CookbookBumper do
       merge_pull_request: true,
       delete_branch: true,
       add_comment: true,
-      permission_level: double(permission: permission)
+      permission_level: double(permission: permission),
+      combined_status: double(state: commit_state)
     )
   end
   let(:repo) do
@@ -263,15 +266,55 @@ RSpec.describe CookbookBumper do
       end
     end
 
-    # The bot holds admin so GitHub would let it bypass required reviews and
-    # checks; it must refuse instead of exploiting that.
-    context 'when branch protection blocks the PR (unapproved or failing checks)' do
+    # The bot holds admin so GitHub would let it bypass protection for anyone;
+    # for a non-admin labeller it must refuse instead of exploiting that.
+    context 'when branch protection blocks the PR and the labeller is not an admin' do
       let(:mergeable_state) { 'blocked' }
 
       it 'refuses with an actionable message and does not merge' do
         expect { bumper(payload).run }
           .to raise_error(CookbookBumper::Error, /blocked by branch protection.*approving review/m)
         expect(github).not_to have_received(:merge_pull_request)
+      end
+    end
+
+    # An admin can merge a protected branch by hand, and cannot approve their
+    # own PR, so the label path has to honor that same bypass or admins could
+    # never release their own work.
+    context 'when branch protection blocks the PR but an admin applied the label' do
+      let(:mergeable_state) { 'blocked' }
+      let(:permission) { 'admin' }
+
+      it 'releases anyway when checks are green' do
+        result = bumper(payload).run
+        expect(github).to have_received(:merge_pull_request)
+        expect(result['cookbooks']).to eq([{ 'name' => 'osl-apache', 'version' => '2.4.0' }])
+      end
+
+      it 'records the bypass on the PR' do
+        bumper(payload).run
+        expect(github).to have_received(:add_comment)
+          .with('osuosl-cookbooks/osl-apache', 42, /admin bypass of branch protection/)
+      end
+
+      context 'but the checks are failing' do
+        let(:commit_state) { 'failure' }
+
+        it 'still refuses — the bypass does not cover red checks' do
+          expect { bumper(payload).run }
+            .to raise_error(CookbookBumper::Error, /checks are not passing/)
+          expect(github).not_to have_received(:merge_pull_request)
+        end
+      end
+
+      context 'and the checks have not finished' do
+        let(:commit_state) { 'pending' }
+
+        it 'waits rather than releasing' do
+          expect { bumper(payload).run }
+            .to raise_error(CookbookBumper::Error, /still unknown/)
+          expect(github).not_to have_received(:merge_pull_request)
+        end
       end
     end
 

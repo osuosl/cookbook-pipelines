@@ -258,11 +258,7 @@ class CookbookBumper
   def authorize_actor!
     raise Error, 'Cannot determine who requested this bump.' if actor.nil? || actor.empty?
 
-    level = begin
-      @github.permission_level(repo_path, actor).permission
-    rescue Octokit::NotFound
-      'none' # not a collaborator at all
-    end
+    level = actor_permission
     return if %w(admin write).include?(level)
 
     raise Error, "user '#{actor}' is not authorized to release #{repo_name} (needs write access)."
@@ -281,19 +277,68 @@ class CookbookBumper
   end
 
   # GitHub computes mergeability lazily; 'unknown' means "not done yet".
-  # Checking mergeable_state (not just mergeable) is what makes the bot
-  # respect required reviews and required checks even though its admin
-  # permission would let it bypass them.
+  # Checking mergeable_state (not just mergeable) stops the bot from silently
+  # spending its own admin bypass on everyone's behalf.
   def wait_for_mergeable(pr)
     MERGEABLE_ATTEMPTS.times do
-      state = pr.mergeable_state.to_s
-      return pr if MERGEABLE_STATES.include?(state)
-      raise Error, mergeable_error(state) unless state.empty? || state == 'unknown'
+      verdict = mergeability(pr)
+      return pr if verdict == :ok
+      raise Error, verdict if verdict.is_a?(String)
 
-      @sleeper.call(2)
+      @sleeper.call(2) # :retry
       pr = fetch_pr
     end
     raise Error, 'PR mergeability is still unknown, try again.'
+  end
+
+  # :ok, :retry, or an error message.
+  def mergeability(pr)
+    state = pr.mergeable_state.to_s
+    return :ok if MERGEABLE_STATES.include?(state)
+    return :retry if state.empty? || state == 'unknown'
+    return blocked_verdict(pr) if state == 'blocked'
+
+    mergeable_error(state)
+  end
+
+  # A repo admin can merge a protected branch by hand, so honor that same
+  # bypass for the admin who applied the label - otherwise an admin could
+  # never release their own PR (GitHub forbids self-approval). The bypass
+  # covers the REVIEW requirement only: a red or unfinished check still stops
+  # the release, since that would publish a frozen version that failed CI.
+  def blocked_verdict(pr)
+    return mergeable_error('blocked') unless admin_actor?
+
+    case commit_state(pr)
+    when 'success'
+      @review_waived = true
+      @out.puts "Branch protection waived for admin '#{actor}' (checks are green)."
+      :ok
+    when 'pending'
+      :retry
+    else
+      "PR is blocked and its checks are not passing (#{commit_state(pr)}); " \
+      'an admin bypass does not cover failing checks.'
+    end
+  end
+
+  # Combined commit status for the PR head. Jenkins reports via the statuses
+  # API; if the org ever switches to the Checks API this needs to consider
+  # check-runs too.
+  def commit_state(pr)
+    @commit_state ||= @github.combined_status(repo_path, pr.head.sha).state.to_s
+  end
+
+  def actor_permission
+    @actor_permission ||= begin
+      @github.permission_level(repo_path, actor).permission
+    rescue Octokit::NotFound
+      'none' # not a collaborator at all
+    end
+  end
+
+  def admin_actor?
+    actor_permission == 'admin'
   end
 
   def mergeable_error(state)
@@ -396,6 +441,10 @@ class CookbookBumper
     end
     message += " Environment bump queued for: #{request[:envs].join(', ')}." unless request[:envs].empty?
     message += " Chained into `#{request[:chain]}`." if request[:chain]
+    if @review_waived
+      message += " :key: Merged using #{actor}'s admin bypass of branch protection " \
+                 '(required checks were green).'
+    end
     @github.add_comment(repo_path, pr_number, message)
   end
 

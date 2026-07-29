@@ -4,7 +4,17 @@ require_relative '../lib/community_deps'
 RSpec.describe CommunityDeps do
   let(:github) { double('github') }
   let(:shell_calls) { [] }
-  let(:shell) { ->(*cmd) { shell_calls << cmd } }
+  # Versions the fake Chef server "has": 'knife cookbook show' succeeds for
+  # these and raises (non-zero exit) for everything else.
+  let(:server_versions) { [] }
+  let(:shell) do
+    lambda do |*cmd|
+      shell_calls << cmd
+      next unless cmd[0, 3] == %w(knife cookbook show)
+
+      raise 'not found' unless server_versions.include?(cmd[3, 2].join(' '))
+    end
+  end
   let(:deps) do
     described_class.new(
       github: github, org: 'osuosl-cookbooks',
@@ -89,11 +99,23 @@ RSpec.describe CommunityDeps do
   describe '#upload' do
     it 'downloads from the public supermarket and shares locally' do
       deps.upload('postfix', '6.1.8')
-      expect(shell_calls[0]).to include('supermarket', 'download', 'postfix', '6.1.8', '-m',
+      expect(shell_calls[0]).to eq(%w(knife cookbook show postfix 6.1.8))
+      expect(shell_calls[1]).to include('supermarket', 'download', 'postfix', '6.1.8', '-m',
                                         'https://supermarket.chef.io')
-      expect(shell_calls[2]).to include('cookbook', 'upload', 'postfix', '--freeze')
-      expect(shell_calls[3]).to include('supermarket', 'share', 'postfix', '-m',
+      expect(shell_calls[3]).to include('cookbook', 'upload', 'postfix', '--freeze')
+      expect(shell_calls[4]).to include('supermarket', 'share', 'postfix', '-m',
                                         'https://supermarket.osuosl.org')
+    end
+
+    # A version already on the Chef server is the routine case (uploaded by an
+    # earlier bump); it must count as success so the env pin still updates.
+    context 'when the version already exists on the Chef server' do
+      let(:server_versions) { ['postfix 6.1.8'] }
+
+      it 'skips the download/upload/share entirely' do
+        deps.upload('postfix', '6.1.8')
+        expect(shell_calls).to eq([%w(knife cookbook show postfix 6.1.8)])
+      end
     end
 
     it 'does nothing when do_not_upload is set' do

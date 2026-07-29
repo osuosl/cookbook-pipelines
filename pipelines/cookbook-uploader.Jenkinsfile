@@ -1,7 +1,11 @@
 // Webhook-driven cookbook release pipeline. One job serves every repo in the
 // org: the generic-webhook-trigger on the job (configured via JCasC job-dsl in
-// the osl-jenkins cookbook) filters for bump/* label events and !bump
-// comments, and passes the raw payload in the `payload` env var.
+// the osl-jenkins cookbook) filters for bump/* label events and passes the raw
+// payload in the `payload` env var.
+//
+// The `!bump` comment fallback is implemented in lib/cookbook_bumper.rb but is
+// NOT wired to the trigger while the legacy per-repo freestyle jobs still own
+// issue_comment — routing both would run two concurrent releases on one PR.
 pipeline {
   agent { label 'built-in' }
 
@@ -12,18 +16,24 @@ pipeline {
 
   environment {
     RESULT_FILE = 'bump_result.json'
+    // The cinc-workstation omnibus already ships ruby, octokit, git and
+    // faraday-http-cache, and it is where knife comes from. Run against it
+    // directly rather than installing gems at release time.
+    RUBY = '/opt/cinc-workstation/embedded/bin/ruby'
   }
 
   stages {
     stage('Bump cookbook') {
       steps {
+        // A stale result file from a previous build would retrigger the
+        // environment bumper even when this run produces none.
+        sh 'rm -f "$RESULT_FILE"'
         withCredentials([usernamePassword(
           credentialsId: 'cookbook_uploader',
           usernameVariable: 'GITHUB_USER',
           passwordVariable: 'GITHUB_TOKEN',
         )]) {
-          sh 'bundle install --quiet'
-          sh 'bundle exec ruby bin/cookbook_bumper.rb'
+          sh '"$RUBY" bin/cookbook_bumper.rb'
         }
       }
     }

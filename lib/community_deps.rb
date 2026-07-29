@@ -10,8 +10,10 @@ require 'tmpdir'
 # `depends` constraint the PR changed in metadata.rb, the newest version
 # satisfying the constraint is resolved against the public Supermarket API,
 # downloaded, uploaded frozen to the Chef server, and shared to the local
-# supermarket. Only direct dependencies are handled; transitive resolution is
-# deliberately out of scope.
+# supermarket. A version already present on the Chef server is skipped and
+# treated as success so its environment pin still updates. Only direct
+# dependencies are handled; transitive resolution is deliberately out of
+# scope.
 class CommunityDeps
   class Error < StandardError
   end
@@ -69,6 +71,16 @@ class CommunityDeps
     @out.puts "Uploading community cookbook #{name} #{version}..."
     return if @do_not_upload
 
+    # The resolved version being on the Chef server already is the routine
+    # case (another cookbook's bump uploaded it, or a re-run). Re-uploading a
+    # frozen version exits non-zero, and the failure would also drop the dep
+    # from the environment pin update - so an existing version is success,
+    # not an error.
+    if uploaded?(name, version)
+      @out.puts "#{name} #{version} is already on the Chef server, skipping upload."
+      return
+    end
+
     Dir.mktmpdir("community-#{name}-") do |dir|
       tarball = File.join(dir, "#{name}.tar.gz")
       @shell.call('knife', 'supermarket', 'download', name, version, '-m', @public_supermarket, '-f', tarball)
@@ -76,6 +88,14 @@ class CommunityDeps
       @shell.call('knife', 'cookbook', 'upload', name, '--freeze', '-o', dir)
       @shell.call('knife', 'supermarket', 'share', name, 'Other', '-m', @local_supermarket, '-o', dir)
     end
+  end
+
+  # Whether this exact cookbook version already exists on the Chef server.
+  def uploaded?(name, version)
+    @shell.call('knife', 'cookbook', 'show', name, version)
+    true
+  rescue StandardError
+    false
   end
 
   private

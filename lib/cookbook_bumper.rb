@@ -7,11 +7,11 @@ require_relative 'github_helpers'
 
 # Merges a cookbook PR and releases a new version of the cookbook.
 #
-# Triggered from a GitHub webhook payload (pull_request or issue_comment
-# event). The primary interface is labels: applying `bump/major`,
-# `bump/minor`, or `bump/patch` to a PR merges it and performs the release;
-# `env/<name>`, `env/default`, and `env/all` labels select the chef-repo
-# environments to pin.
+# Triggered from a GitHub pull_request webhook payload. The interface is
+# labels: applying `bump/major`, `bump/minor`, or `bump/patch` to a PR merges
+# it and performs the release; `env/<name>`, `env/default`, and `env/all`
+# labels select the chef-repo environments to pin (no env label means
+# env/default).
 #
 # `bump/skip` merges the PR with no release at all, for changes that don't
 # affect production cookbook code.
@@ -20,10 +20,6 @@ require_relative 'github_helpers'
 # are requested with a `Cookbook-Chain: <name>` line in the PR description or
 # in a commit message on the PR - labels can't carry free-form names without
 # per-repo label churn. Use the same chain name on every PR in the series.
-#
-# A `!bump <level> [envs] [envs=a,b] [chain=name]` PR comment is retained as a
-# fallback for ad-hoc input; commenters must have write access to the repo.
-# An explicit `chain=` there overrides any Chain: directive.
 #
 # The release: merge the PR, bump the version in metadata.rb, prepend a
 # CHANGELOG entry, tag, push to the PR's base branch (no branch name is ever
@@ -50,7 +46,6 @@ class CookbookBumper
   # free-form name: a full PR URL or [org/]repo#123.
   CHAIN_PR_URL_RE = %r{\Ahttps?://github\.com/[^/]+/([^/]+)/pull/(\d+)/?\z}i
   CHAIN_PR_REF_RE = %r{\A(?:[\w.-]+/)?([\w.-]+)#(\d+)\z}
-  COMMENT_RE = /\A!bump (#{(LEVELS + [SKIP]).join('|')})(\s.*)?\z/
   METADATA_FILE = 'metadata.rb'.freeze
   CHANGELOG_FILE = 'CHANGELOG.md'.freeze
   VERSION_RE = /^(version\s+)(["'])(\d+\.\d+\.\d+)\2$/
@@ -110,9 +105,9 @@ class CookbookBumper
       return nil
     end
 
-    request = merge_labels_into(request, pr) if request[:source] == :label
-    # An explicit chain= from the comment fallback wins; otherwise honor a
-    # 'Cookbook-Chain: <value>' directive in the PR body or a commit message.
+    request = merge_labels_into(request, pr)
+    # Honor a 'Cookbook-Chain: <value>' directive in the PR body or a commit
+    # message.
     request[:chain] ||= chain_directive(pr)
     request[:chain] = normalize_chain(request[:chain])
 
@@ -160,56 +155,29 @@ class CookbookBumper
   end
 
   def pr_number
-    @payload.dig('pull_request', 'number') || @payload.dig('issue', 'number')
+    @payload.dig('pull_request', 'number')
   end
 
   def pr_title
-    @payload.dig('pull_request', 'title') || @payload.dig('issue', 'title')
+    @payload.dig('pull_request', 'title')
   end
 
   def actor
-    @payload.dig('sender', 'login') || @payload.dig('comment', 'user', 'login')
+    @payload.dig('sender', 'login')
   end
 
   def do_not_upload?
     @env['DO_NOT_UPLOAD'] == 'true'
   end
 
-  # Detect whether this payload is a bump request and extract level/envs/chain.
+  # Detect whether this payload is a bump request and extract the level.
   def parse_trigger
-    if @payload['action'] == 'labeled' && @payload.key?('pull_request')
-      match = BUMP_LABEL_RE.match(@payload.dig('label', 'name').to_s)
-      return nil unless match
+    return nil unless @payload['action'] == 'labeled' && @payload.key?('pull_request')
 
-      { source: :label, level: match[1], envs: [], chain: nil }
-    elsif @payload['action'] == 'created' && @payload.key?('comment')
-      return nil unless @payload.dig('issue', 'pull_request')
-
-      parse_comment(@payload.dig('comment', 'body').to_s)
-    end
-  end
-
-  def parse_comment(body)
-    match = COMMENT_RE.match(body.strip)
+    match = BUMP_LABEL_RE.match(@payload.dig('label', 'name').to_s)
     return nil unless match
 
-    request = { source: :comment, level: match[1], envs: [], chain: nil }
-    match[2].to_s.split.each do |token|
-      key, value = token.split('=', 2)
-      case key
-      when 'chain' then request[:chain] = value
-      when 'envs' then request[:envs] = expand_env_words(value)
-      else request[:envs] = expand_env_words(token)
-      end
-    end
-    request
-  end
-
-  # Legacy '~' and '*' keywords map onto the label-era 'default'/'all' tokens.
-  def expand_env_words(list)
-    list.split(',').map do |env_name|
-      { '~' => 'default', '*' => 'all' }.fetch(env_name, env_name)
-    end
+    { level: match[1], envs: [], chain: nil }
   end
 
   # On the label path, environment selection comes from the PR's current
@@ -265,8 +233,7 @@ class CookbookBumper
   # Releasing is far more privileged than labelling: it merges the PR, pushes
   # a tag to the base branch and freezes a version on the Chef server. GitHub
   # grants labelling to triage users who cannot merge or push, so require push
-  # access explicitly for BOTH the label and the comment path rather than
-  # trusting the label event itself.
+  # access explicitly rather than trusting the label event itself.
   def authorize_actor!
     raise Error, 'Cannot determine who requested this bump.' if actor.nil? || actor.empty?
 

@@ -1,11 +1,7 @@
 // Webhook-driven cookbook release pipeline. One job serves every repo in the
 // org: the generic-webhook-trigger on the job (configured via JCasC job-dsl in
 // the osl-jenkins cookbook) filters for bump/* label events and passes the raw
-// payload in the `payload` env var.
-//
-// The `!bump` comment fallback is implemented in lib/cookbook_bumper.rb but is
-// NOT wired to the trigger while the legacy per-repo freestyle jobs still own
-// issue_comment — routing both would run two concurrent releases on one PR.
+// payload in the `payload` env var. Labels are the only trigger interface.
 pipeline {
   agent { label 'built-in' }
 

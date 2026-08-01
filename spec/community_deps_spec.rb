@@ -15,12 +15,15 @@ RSpec.describe CommunityDeps do
       raise 'not found' unless server_versions.include?(cmd[3, 2].join(' '))
     end
   end
+  # What the fake Chef server /universe reports as present.
+  let(:universe) { {} }
+  let(:out) { StringIO.new }
   let(:deps) do
     described_class.new(
       github: github, org: 'osuosl-cookbooks',
       public_supermarket: 'https://supermarket.chef.io',
       local_supermarket: 'https://supermarket.osuosl.org',
-      shell: shell, out: StringIO.new
+      shell: shell, server_universe: -> { universe }, out: out
     )
   end
 
@@ -28,6 +31,20 @@ RSpec.describe CommunityDeps do
     allow(github).to receive(:pull_request_files)
       .with('osuosl-cookbooks/osl-apache', 42)
       .and_return([double(filename: 'metadata.rb', patch: patch)])
+  end
+
+  # The public supermarket's per-version metadata, which carries each
+  # version's dependency constraints.
+  def stub_version_deps(name, version, dependencies = {})
+    stub_request(:get, "https://supermarket.chef.io/api/v1/cookbooks/#{name}/versions/#{version.tr('.', '_')}")
+      .to_return(status: 200, body: JSON.generate('dependencies' => dependencies))
+  end
+
+  def stub_cookbook_versions(name, versions)
+    stub_request(:get, "https://supermarket.chef.io/api/v1/cookbooks/#{name}")
+      .to_return(status: 200, body: JSON.generate(
+        'versions' => versions.map { |v| "https://supermarket.chef.io/api/v1/cookbooks/#{name}/versions/#{v.tr('.', '_')}" }
+      ))
   end
 
   describe '#changed_constraints' do
@@ -129,19 +146,84 @@ RSpec.describe CommunityDeps do
   end
 
   describe '#call' do
+    before do
+      allow(github).to receive(:repository?).with('osuosl-cookbooks/postfix').and_return(false)
+      allow(github).to receive(:repository?).with('osuosl-cookbooks/osl-nginx').and_return(true)
+      stub_request(:get, 'https://supermarket.chef.io/api/v1/cookbooks/postfix')
+        .to_return(status: 200, body: fixture('supermarket_cookbook.json'))
+    end
+
     it 'resolves and uploads only community deps' do
       stub_pr_files(<<~PATCH)
         +depends 'postfix', '~> 6.1'
         +depends 'osl-nginx', '~> 2.0'
       PATCH
-      allow(github).to receive(:repository?).with('osuosl-cookbooks/postfix').and_return(false)
-      allow(github).to receive(:repository?).with('osuosl-cookbooks/osl-nginx').and_return(true)
-      stub_request(:get, 'https://supermarket.chef.io/api/v1/cookbooks/postfix')
-        .to_return(status: 200, body: fixture('supermarket_cookbook.json'))
+      stub_version_deps('postfix', '6.1.8')
 
       expect(deps.call('osuosl-cookbooks/osl-apache', 42))
         .to eq([{ name: 'postfix', version: '6.1.8' }])
       expect(shell_calls).not_to be_empty
+    end
+
+    context 'with transitive dependencies' do
+      before do
+        stub_pr_files("+depends 'postfix', '~> 6.1'\n")
+        allow(github).to receive(:repository?).with('osuosl-cookbooks/yum-epel').and_return(false)
+        allow(github).to receive(:repository?).with('osuosl-cookbooks/yum').and_return(false)
+      end
+
+      it 'uploads a transitive dep the server cannot satisfy, recursively' do
+        stub_version_deps('postfix', '6.1.8', 'yum-epel' => '>= 4.0')
+        stub_cookbook_versions('yum-epel', %w(4.1.2 5.0.0))
+        stub_version_deps('yum-epel', '5.0.0', 'yum' => '>= 7.0')
+        stub_cookbook_versions('yum', %w(7.4.13))
+        stub_version_deps('yum', '7.4.13')
+
+        expect(deps.call('osuosl-cookbooks/osl-apache', 42)).to eq(
+          [{ name: 'postfix', version: '6.1.8' },
+           { name: 'yum-epel', version: '5.0.0' },
+           { name: 'yum', version: '7.4.13' },]
+        )
+      end
+
+      it 'leaves a dep alone when the server already satisfies it' do
+        stub_version_deps('postfix', '6.1.8', 'yum-epel' => '>= 4.0')
+        universe['yum-epel'] = { '4.1.2' => {} }
+
+        expect(deps.call('osuosl-cookbooks/osl-apache', 42))
+          .to eq([{ name: 'postfix', version: '6.1.8' }])
+        expect(shell_calls.flatten.join(' ')).not_to include('yum-epel')
+      end
+
+      it 'skips org cookbooks but warns when the server lacks them entirely' do
+        allow(github).to receive(:repository?).with('osuosl-cookbooks/osl-repos').and_return(true)
+        stub_version_deps('postfix', '6.1.8', 'osl-repos' => '>= 5.0')
+
+        expect(deps.call('osuosl-cookbooks/osl-apache', 42))
+          .to eq([{ name: 'postfix', version: '6.1.8' }])
+        expect(out.string).to include('osl-repos is an org cookbook the Chef server does not have')
+      end
+
+      it 'merges constraints from several dependents of a missing dep' do
+        stub_version_deps('postfix', '6.1.8', 'yum-epel' => '>= 4.0', 'yum' => '~> 7.0')
+        universe['yum-epel'] = { '4.1.2' => {} }
+        stub_cookbook_versions('yum', %w(7.4.13 8.0.0))
+        stub_version_deps('yum', '7.4.13')
+
+        expect(deps.call('osuosl-cookbooks/osl-apache', 42))
+          .to eq([{ name: 'postfix', version: '6.1.8' }, { name: 'yum', version: '7.4.13' }])
+      end
+
+      it 'raises on conflicting requirements for something already uploaded' do
+        stub_version_deps('postfix', '6.1.8', 'yum-epel' => '>= 4.0', 'yum' => '>= 0')
+        stub_cookbook_versions('yum-epel', %w(5.0.0))
+        stub_version_deps('yum-epel', '5.0.0')
+        stub_cookbook_versions('yum', %w(7.4.13))
+        stub_version_deps('yum', '7.4.13', 'yum-epel' => '< 5.0')
+
+        expect { deps.call('osuosl-cookbooks/osl-apache', 42) }
+          .to raise_error(CommunityDeps::Error, /conflicting requirements: yum-epel 5\.0\.0/)
+      end
     end
   end
 end

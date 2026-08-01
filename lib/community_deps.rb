@@ -1,3 +1,4 @@
+require 'English'
 require 'json'
 require 'net/http'
 require 'tmpdir'
@@ -11,34 +12,53 @@ require 'tmpdir'
 # satisfying the constraint is resolved against the public Supermarket API,
 # downloaded, uploaded frozen to the Chef server, and shared to the local
 # supermarket. A version already present on the Chef server is skipped and
-# treated as success so its environment pin still updates. Only direct
-# dependencies are handled; transitive resolution is deliberately out of
-# scope.
+# treated as success so its environment pin still updates.
+#
+# The dependency graph of everything uploaded is then walked (the public
+# Supermarket knows each version's dependencies) and any transitive community
+# dependency the Chef server cannot already satisfy is uploaded and pinned
+# the same way. A dependency the server *can* satisfy is left untouched:
+# upgrading pins nobody asked for is not this job's call, and the chef-repo
+# environment pin check reports unpinned floats.
 class CommunityDeps
   class Error < StandardError
   end
 
   DEPENDS_RE = /\Adepends\s+(["'])([^"']+)\1(?:\s*,\s*(["'])([^"']+)\3)?/
 
-  def initialize(github:, org:, public_supermarket:, local_supermarket:, shell:, do_not_upload: false, out: $stdout)
+  # The Chef server's full version index, fetched with the pipeline's knife
+  # credentials. Injectable for tests.
+  DEFAULT_SERVER_UNIVERSE = lambda do
+    raw = `knife raw /universe`
+    raise Error, 'failed to fetch /universe from the chef server' unless $CHILD_STATUS.success?
+
+    JSON.parse(raw)
+  end
+
+  def initialize(github:, org:, public_supermarket:, local_supermarket:, shell:, do_not_upload: false,
+                 server_universe: nil, out: $stdout)
     @github = github
     @org = org
     @public_supermarket = public_supermarket
     @local_supermarket = local_supermarket
     @do_not_upload = do_not_upload
     @shell = shell
+    @server_universe_fetcher = server_universe || DEFAULT_SERVER_UNIVERSE
     @out = out
   end
 
-  # Returns [{name:, version:}] for every community dependency the PR changed.
+  # Returns [{name:, version:}] for every community dependency the PR
+  # changed, plus every missing transitive community dependency underneath
+  # them.
   def call(repo_path, pr_number)
-    changed_constraints(repo_path, pr_number).filter_map do |name, constraint|
+    direct = changed_constraints(repo_path, pr_number).filter_map do |name, constraint|
       next unless community?(name)
 
       version = resolve(name, constraint)
       upload(name, version)
       { name: name, version: version }
     end
+    direct + transitive_closure(direct)
   end
 
   # Parse the PR's metadata.rb patch for depends lines that were added or
@@ -53,16 +73,19 @@ class CommunityDeps
   end
 
   def community?(name)
-    !@github.repository?("#{@org}/#{name}")
+    @community ||= {}
+    @community.fetch(name) { @community[name] = !@github.repository?("#{@org}/#{name}") }
   end
 
-  # Newest version on the public supermarket satisfying the constraint.
+  # Newest version on the public supermarket satisfying the constraint(s).
   def resolve(name, constraint)
+    constraints = Array(constraint || '>= 0')
+    constraints = ['>= 0'] if constraints.empty?
     body = fetch_json("#{@public_supermarket}/api/v1/cookbooks/#{name}")
     versions = body['versions'].map { |url| url.split('/').last.tr('_', '.') }
-    requirement = Gem::Requirement.new(constraint || '>= 0')
+    requirement = Gem::Requirement.new(constraints)
     version = versions.map { |v| Gem::Version.new(v) }.select { |v| requirement.satisfied_by?(v) }.max
-    raise Error, "no version of '#{name}' satisfies '#{constraint}'" if version.nil?
+    raise Error, "no version of '#{name}' satisfies '#{constraints.join(', ')}'" if version.nil?
 
     version.to_s
   end
@@ -99,6 +122,71 @@ class CommunityDeps
   end
 
   private
+
+  # Walk the dependency graph of everything just uploaded and upload any
+  # community dependency the Chef server cannot already satisfy. Constraints
+  # from every dependent of a missing cookbook are merged; conflicting
+  # requirements on something already uploaded are an error rather than a
+  # guess.
+  def transitive_closure(seed)
+    resolved = seed.to_h { |c| [c[:name], c[:version]] }
+    constraints = Hash.new { |h, k| h[k] = [] }
+    uploaded = []
+    queue = seed.map { |c| c[:name] }
+    until queue.empty?
+      name = queue.shift
+      dependencies_of(name, resolved.fetch(name)).each do |dep, constraint|
+        constraints[dep] << constraint if constraint
+        if resolved.key?(dep)
+          verify_resolved!(dep, resolved[dep], constraint)
+          next
+        end
+        next if org_dependency?(dep) # its own pipeline releases it
+        next if server_satisfies?(dep, constraint)
+
+        version = resolve(dep, constraints[dep])
+        upload(dep, version)
+        resolved[dep] = version
+        uploaded << { name: dep, version: version }
+        queue << dep
+      end
+    end
+    uploaded
+  end
+
+  # Dependency constraints of a specific cookbook version, from the public
+  # supermarket (versions are underscored in its URLs).
+  def dependencies_of(name, version)
+    fetch_json("#{@public_supermarket}/api/v1/cookbooks/#{name}/versions/#{version.tr('.', '_')}")
+      .fetch('dependencies', {}) || {}
+  end
+
+  def verify_resolved!(name, version, constraint)
+    return if constraint.nil? || Gem::Requirement.new(constraint).satisfied_by?(Gem::Version.new(version))
+
+    raise Error, "conflicting requirements: #{name} #{version} was uploaded but another dependency needs #{constraint}"
+  end
+
+  # An org cookbook found transitively is never uploaded here - it releases
+  # through its own pipeline - but the server having no version of it at all
+  # is worth a loud warning, since nothing else will say so until converge.
+  def org_dependency?(name)
+    return false if community?(name)
+
+    if (server_universe[name] || {}).empty?
+      @out.puts "WARNING: #{name} is an org cookbook the Chef server does not have; release it first."
+    end
+    true
+  end
+
+  def server_satisfies?(name, constraint)
+    requirement = Gem::Requirement.new(Array(constraint || '>= 0'))
+    (server_universe[name] || {}).keys.any? { |v| requirement.satisfied_by?(Gem::Version.new(v)) }
+  end
+
+  def server_universe
+    @server_universe ||= @server_universe_fetcher.call
+  end
 
   def depends_in(patch, sign)
     patch.each_line.filter_map do |line|

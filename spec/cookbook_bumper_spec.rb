@@ -41,6 +41,7 @@ RSpec.describe CookbookBumper do
       merge_pull_request: true,
       delete_branch: true,
       add_comment: true,
+      add_labels_to_an_issue: true,
       permission_level: double(permission: permission),
       combined_status: double(state: commit_state)
     )
@@ -94,6 +95,28 @@ RSpec.describe CookbookBumper do
 
     it 'collects environments from env/* labels' do
       expect(bumper(payload).run['envs']).to eq('production')
+      expect(github).not_to have_received(:add_labels_to_an_issue)
+    end
+
+    # Forgetting the env label is far more common than deliberately wanting
+    # no environment bump, so an unlabeled release defaults to env/default.
+    context 'with no env label on the PR' do
+      let(:pr_labels) { [double(name: 'bump/minor')] }
+
+      it 'defaults to env/default and records the label on the PR' do
+        result = bumper(payload).run
+        expect(result['envs']).to eq('default')
+        expect(github).to have_received(:add_labels_to_an_issue)
+          .with('osuosl-cookbooks/osl-apache', 42, ['env/default'])
+        expect(File).to exist(env['RESULT_FILE'])
+      end
+
+      it 'still releases when the label cannot be added' do
+        allow(github).to receive(:add_labels_to_an_issue)
+          .and_raise(Octokit::Forbidden)
+        expect(bumper(payload).run['envs']).to eq('default')
+        expect(File).to exist(env['RESULT_FILE'])
+      end
     end
 
     it 'writes the result file for the environment bumper' do
@@ -345,6 +368,11 @@ RSpec.describe CookbookBumper do
         expect(repo).not_to have_received(:add_tag)
         expect(shell_calls).to be_empty
         expect(File).not_to exist(env['RESULT_FILE'])
+      end
+
+      it 'never adds the env/default label - skip touches no environments' do
+        bumper(payload).run
+        expect(github).not_to have_received(:add_labels_to_an_issue)
       end
 
       it 'says so on the PR' do

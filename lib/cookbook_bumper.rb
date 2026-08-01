@@ -212,11 +212,23 @@ class CookbookBumper
     end
   end
 
-  # On the label path, environment selection comes from the PR's current labels.
+  # On the label path, environment selection comes from the PR's current
+  # labels. No env/* label almost always means it was forgotten, not that no
+  # environment should be bumped: default the selection and put the label on
+  # the PR so the record shows what was released where.
   def merge_labels_into(request, pr)
     pr.labels.each do |label|
       if (match = ENV_LABEL_RE.match(label.name))
         request[:envs] << match[1]
+      end
+    end
+    if request[:envs].empty?
+      request[:envs] << 'default'
+      begin
+        @github.add_labels_to_an_issue(repo_path, pr_number, ['env/default'])
+      rescue Octokit::Error => e
+        # Label bookkeeping must never block the release itself.
+        @out.puts "Could not add the env/default label: #{e.message}"
       end
     end
     request

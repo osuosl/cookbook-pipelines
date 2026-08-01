@@ -64,9 +64,16 @@ class GithubSync
   # only way to satisfy both is a rebase.
   DESIRED_REPO_SETTINGS = {
     delete_branch_on_merge: true,
-    allow_rebase_merge: true,
+    # A merge commit is the only way PRs land: squash and rebase merging are
+    # both off (allow_merge_commit itself is deliberately left alone).
+    allow_rebase_merge: false,
+    allow_squash_merge: false,
     allow_update_branch: true,
   }.freeze
+
+  # Branch names that get protection whenever they exist, so a repo mid-way
+  # through a master -> main rename has both covered.
+  MIGRATION_BRANCHES = %w(master main).freeze
 
   # The org folder's PR check. Required on migrated repos, which also retires
   # the legacy GHPRB context so nobody has to swap it by hand.
@@ -279,25 +286,40 @@ class GithubSync
   def ensure_branch_protection(repo_name, repo_path, migrated, stats)
     return unless @env.fetch('PROTECT_BRANCHES', 'true') == 'true'
 
-    branch = repo_info(repo_name).default_branch
     bot = @env.fetch('GITHUB_USER')
+    protection_branches(repo_name, repo_path).each do |branch|
+      existing = begin
+        @github.branch_protection(repo_path, branch)
+      rescue Octokit::NotFound
+        nil
+      end
 
-    existing = begin
-      @github.branch_protection(repo_path, branch)
-    rescue Octokit::NotFound
-      nil
-    end
+      desired = protection_request(existing, bot, migrated: migrated)
+      if protection_current?(existing, desired, bot)
+        stats[:protection_current] += 1
+        next
+      end
 
-    desired = protection_request(existing, bot, migrated: migrated)
-    if protection_current?(existing, desired, bot)
-      stats[:protection_current] += 1
-      return
+      act("protect #{repo_path}@#{branch} (merges restricted to #{bot}, up-to-date branches required)") do
+        @github.protect_branch(repo_path, branch, desired)
+      end
+      stats[:protection_updated] += 1
     end
+  end
 
-    act("protect #{repo_path}@#{branch} (merges restricted to #{bot}, up-to-date branches required)") do
-      @github.protect_branch(repo_path, branch, desired)
+  # The default branch plus whichever of master/main also exists.
+  def protection_branches(repo_name, repo_path)
+    default = repo_info(repo_name).default_branch
+    ([default] | MIGRATION_BRANCHES).select do |name|
+      name == default || branch_exists?(repo_path, name)
     end
-    stats[:protection_updated] += 1
+  end
+
+  def branch_exists?(repo_path, name)
+    @github.branch(repo_path, name)
+    true
+  rescue Octokit::NotFound
+    false
   end
 
   def protection_current?(existing, desired, bot)
@@ -305,6 +327,9 @@ class GithubSync
 
     users = (existing.restrictions&.users || []).map(&:login)
     return false unless users == [bot] && existing.enforce_admins&.enabled == false
+
+    reviews = existing.required_pull_request_reviews
+    return false if reviews && !reviews.dismiss_stale_reviews
 
     checks_current?(existing.required_status_checks, desired[:required_status_checks])
   end
@@ -347,7 +372,9 @@ class GithubSync
       },
       required_status_checks: required_status_checks(existing, migrated: migrated),
       required_pull_request_reviews: reviews && {
-        dismiss_stale_reviews: reviews.dismiss_stale_reviews,
+        # Forced on where reviews are required at all: a new push dismisses
+        # old approvals, so what merges is what was actually reviewed.
+        dismiss_stale_reviews: true,
         require_code_owner_reviews: reviews.require_code_owner_reviews,
         required_approving_review_count: reviews.required_approving_review_count,
       }.compact,

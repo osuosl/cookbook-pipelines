@@ -25,6 +25,7 @@ RSpec.describe GithubSync do
   let(:migrated) { false }
   let(:repo_settings) { {} }
   let(:repo_teams) { [] }
+  let(:existing_branches) { %w(master) }
   let(:github) do
     github = double(
       'github',
@@ -39,6 +40,11 @@ RSpec.describe GithubSync do
     )
     allow(github).to receive(:labels).and_return(repo_labels)
     allow(github).to receive(:hooks).and_return(repo_hooks)
+    allow(github).to receive(:branch) do |_repo, name|
+      raise Octokit::NotFound.new(status: 404) unless existing_branches.include?(name)
+
+      double(name: name)
+    end
     if migrated
       allow(github).to receive(:contents).and_return(double)
     else
@@ -218,11 +224,12 @@ RSpec.describe GithubSync do
   end
 
   describe 'repo settings' do
-    it 'enables branch auto-delete, rebase merges and branch updates' do
+    it 'enables auto-delete and branch updates; disables squash and rebase merges' do
       result = sync.run
       expect(github).to have_received(:edit_repository).with(
         'osuosl-cookbooks/osl-apache',
-        delete_branch_on_merge: true, allow_rebase_merge: true, allow_update_branch: true
+        delete_branch_on_merge: true, allow_rebase_merge: false,
+        allow_squash_merge: false, allow_update_branch: true
       )
       expect(result[:stats][:settings_updated]).to eq(1)
     end
@@ -235,7 +242,8 @@ RSpec.describe GithubSync do
 
     context 'when they are already set' do
       let(:repo_settings) do
-        { delete_branch_on_merge: true, allow_rebase_merge: true, allow_update_branch: true }
+        { delete_branch_on_merge: true, allow_rebase_merge: false,
+          allow_squash_merge: false, allow_update_branch: true, }
       end
 
       it 'issues no write' do
@@ -245,7 +253,9 @@ RSpec.describe GithubSync do
     end
 
     context 'when only one setting drifted' do
-      let(:repo_settings) { { delete_branch_on_merge: true, allow_rebase_merge: true } }
+      let(:repo_settings) do
+        { delete_branch_on_merge: true, allow_rebase_merge: false, allow_squash_merge: false }
+      end
 
       it 'writes just that key' do
         sync.run
@@ -371,6 +381,48 @@ RSpec.describe GithubSync do
         result = sync.run
         expect(github).not_to have_received(:protect_branch)
         expect(result[:stats][:protection_current]).to eq(1)
+      end
+    end
+
+    # A repo mid-way through a master -> main rename has both branches live;
+    # both must carry the same rules or the unprotected one is a bypass.
+    context 'when both master and main exist' do
+      let(:existing_branches) { %w(master main) }
+
+      it 'protects both branches' do
+        result = sync.run
+        expect(github).to have_received(:protect_branch)
+          .with('osuosl-cookbooks/osl-apache', 'master', anything)
+        expect(github).to have_received(:protect_branch)
+          .with('osuosl-cookbooks/osl-apache', 'main', anything)
+        expect(result[:stats][:protection_updated]).to eq(2)
+      end
+    end
+
+    context 'when stale-review dismissal is off' do
+      let(:protection) do
+        double(
+          enforce_admins: double(enabled: false),
+          restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
+          required_status_checks: nil,
+          required_pull_request_reviews: double(
+            dismiss_stale_reviews: false,
+            require_code_owner_reviews: false,
+            required_approving_review_count: 1
+          )
+        )
+      end
+
+      it 'turns it on while keeping the other review settings' do
+        sync.run
+        expect(github).to have_received(:protect_branch).with(
+          'osuosl-cookbooks/osl-apache', 'master',
+          hash_including(
+            required_pull_request_reviews: hash_including(
+              dismiss_stale_reviews: true, required_approving_review_count: 1
+            )
+          )
+        )
       end
     end
 

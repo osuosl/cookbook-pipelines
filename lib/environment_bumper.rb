@@ -148,8 +148,9 @@ class EnvironmentBumper
   end
 
   # Update pins everywhere selected; add missing pins only where addable.
-  # New pins are appended to cookbook_versions so existing entries keep their
-  # order and the PR diff stays minimal. Returns
+  # cookbook_versions is written back alphabetized, so a new pin lands in a
+  # predictable place instead of accumulating at the bottom; files where
+  # nothing changed are left untouched. Returns
   # { updated: {name => [envs]}, added: {name => [envs]} }.
   def pin_versions(env_entries)
     updated = Hash.new { |h, k| h[k] = [] }
@@ -160,6 +161,7 @@ class EnvironmentBumper
 
       data = JSON.parse(File.read(file))
       pins = data['cookbook_versions']
+      changed = false
       cookbooks.each do |cookbook|
         pin = "= #{cookbook[:version]}"
         if pins.include?(cookbook[:name])
@@ -170,8 +172,14 @@ class EnvironmentBumper
         elsif addable
           pins[cookbook[:name]] = pin
           added[cookbook[:name]] << env_name
+        else
+          next
         end
+        changed = true
       end
+      next unless changed
+
+      data['cookbook_versions'] = pins.sort.to_h
       File.write(file, "#{JSON.pretty_generate(data)}\n")
     end
     { updated: updated, added: added }

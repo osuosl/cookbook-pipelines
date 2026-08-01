@@ -162,6 +162,21 @@ RSpec.describe EnvironmentBumper do
         .with(/osl-postfix to v2\.1\.0, brand-new-dep to v3\.2\.0/)
     end
 
+    it 'writes cookbook_versions alphabetized so new pins land predictably' do
+      bumper('cookbooks' => 'brand-new-dep:3.2.0', 'envs' => 'production').run
+      expect(environment('production')['cookbook_versions'].keys)
+        .to eq(%w(apt brand-new-dep osl-postfix postfix))
+    end
+
+    it 'leaves an environment file untouched when nothing changed in it' do
+      # osl-postfix is already at 2.0.0 in staging; re-pinning production only
+      # must not rewrite (and re-sort) staging.
+      bumper('cookbooks' => 'osl-postfix:2.1.0', 'envs' => 'production').run
+      expect(environment('staging')['cookbook_versions'].keys).to eq(%w(osl-postfix))
+      expect(environment('production')['cookbook_versions'].keys)
+        .to eq(%w(apt osl-postfix postfix))
+    end
+
     it 'calls out newly added pins in the PR body' do
       bumper('cookbooks' => 'osl-postfix:2.1.0,brand-new-dep:3.2.0', 'envs' => 'production').run
       expect(github).to have_received(:create_pull_request)

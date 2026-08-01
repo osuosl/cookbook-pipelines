@@ -18,10 +18,11 @@ cookbook via JCasC job-dsl.
   not the workspace HEAD, which is Jenkins' own merge of PR into target.
 - `pipelines/cookbook-uploader.Jenkinsfile` — single webhook-driven release
   pipeline for all cookbook repos. Triggered by `bump/major|minor|patch`
-  labels; releasing requires GitHub write access (checked via the API for
-  both trigger paths). A `!bump <level> [envs=a,b] [chain=name]` comment
-  fallback exists but stays unwired until cutover. Runs
-  `bin/cookbook_bumper.rb`, then hands off to the environment-bumper job.
+  labels only; releasing requires GitHub write access (checked via the API,
+  since triage users can label but must not release). A PR with no `env/*`
+  label defaults to `env/default` and gets that label added for the record.
+  Runs `bin/cookbook_bumper.rb`, then hands off to the environment-bumper
+  job.
 - Chained bumps: a `Cookbook-Chain: <value>` line in the PR description
   (preferred) or a commit message accumulates several related releases into
   one chef-repo PR on `jenkins/chain-<key>`. The value is either a free-form

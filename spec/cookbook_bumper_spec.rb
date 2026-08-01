@@ -41,6 +41,7 @@ RSpec.describe CookbookBumper do
       merge_pull_request: true,
       delete_branch: true,
       add_comment: true,
+      add_labels_to_an_issue: true,
       permission_level: double(permission: permission),
       combined_status: double(state: commit_state)
     )
@@ -94,6 +95,28 @@ RSpec.describe CookbookBumper do
 
     it 'collects environments from env/* labels' do
       expect(bumper(payload).run['envs']).to eq('production')
+      expect(github).not_to have_received(:add_labels_to_an_issue)
+    end
+
+    # Forgetting the env label is far more common than deliberately wanting
+    # no environment bump, so an unlabeled release defaults to env/default.
+    context 'with no env label on the PR' do
+      let(:pr_labels) { [double(name: 'bump/minor')] }
+
+      it 'defaults to env/default and records the label on the PR' do
+        result = bumper(payload).run
+        expect(result['envs']).to eq('default')
+        expect(github).to have_received(:add_labels_to_an_issue)
+          .with('osuosl-cookbooks/osl-apache', 42, ['env/default'])
+        expect(File).to exist(env['RESULT_FILE'])
+      end
+
+      it 'still releases when the label cannot be added' do
+        allow(github).to receive(:add_labels_to_an_issue)
+          .and_raise(Octokit::Forbidden)
+        expect(bumper(payload).run['envs']).to eq('default')
+        expect(File).to exist(env['RESULT_FILE'])
+      end
     end
 
     it 'writes the result file for the environment bumper' do
@@ -347,6 +370,11 @@ RSpec.describe CookbookBumper do
         expect(File).not_to exist(env['RESULT_FILE'])
       end
 
+      it 'never adds the env/default label - skip touches no environments' do
+        bumper(payload).run
+        expect(github).not_to have_received(:add_labels_to_an_issue)
+      end
+
       it 'says so on the PR' do
         bumper(payload).run
         expect(github).to have_received(:add_comment)
@@ -395,39 +423,9 @@ RSpec.describe CookbookBumper do
     end
   end
 
-  context 'with a !bump comment event' do
-    let(:payload) { json_fixture('comment_payload.json') }
-
-    before do
-      allow(github).to receive(:permission_level)
-        .and_return(double(permission: 'write'))
-    end
-
-    it 'parses level, envs, and chain from the comment' do
-      result = bumper(payload).run
-      expect(result['cookbooks']).to eq([{ 'name' => 'osl-apache', 'version' => '2.3.5' }])
-      expect(result['envs']).to eq('production,staging')
-      expect(result['chain']).to eq('postfix-refactor')
-    end
-
-    it 'requires write access' do
-      allow(github).to receive(:permission_level).and_return(double(permission: 'read'))
-      expect { bumper(payload).run }.to raise_error(CookbookBumper::Error, /not authorized/)
-    end
-
-    it 'maps legacy ~ and * env words' do
-      payload['comment']['body'] = '!bump major ~'
-      expect(bumper(payload).run['envs']).to eq('default')
-    end
-
-    it 'ignores non-bump comments' do
-      payload['comment']['body'] = 'looks good to me!'
-      expect(bumper(payload).run).to be_nil
-    end
-
-    it 'ignores comments on non-PR issues' do
-      payload['issue'].delete('pull_request')
-      expect(bumper(payload).run).to be_nil
-    end
+  it 'ignores non-labeled pull_request payloads' do
+    payload = json_fixture('labeled_payload.json')
+    payload['action'] = 'synchronize'
+    expect(bumper(payload).run).to be_nil
   end
 end

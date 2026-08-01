@@ -218,11 +218,12 @@ RSpec.describe GithubSync do
   end
 
   describe 'repo settings' do
-    it 'enables branch auto-delete, rebase merges and branch updates' do
+    it 'enables auto-delete and branch updates; disables squash and rebase merges' do
       result = sync.run
       expect(github).to have_received(:edit_repository).with(
         'osuosl-cookbooks/osl-apache',
-        delete_branch_on_merge: true, allow_rebase_merge: true, allow_update_branch: true
+        delete_branch_on_merge: true, allow_rebase_merge: false,
+        allow_squash_merge: false, allow_update_branch: true
       )
       expect(result[:stats][:settings_updated]).to eq(1)
     end
@@ -235,7 +236,8 @@ RSpec.describe GithubSync do
 
     context 'when they are already set' do
       let(:repo_settings) do
-        { delete_branch_on_merge: true, allow_rebase_merge: true, allow_update_branch: true }
+        { delete_branch_on_merge: true, allow_rebase_merge: false,
+          allow_squash_merge: false, allow_update_branch: true, }
       end
 
       it 'issues no write' do
@@ -245,7 +247,9 @@ RSpec.describe GithubSync do
     end
 
     context 'when only one setting drifted' do
-      let(:repo_settings) { { delete_branch_on_merge: true, allow_rebase_merge: true } }
+      let(:repo_settings) do
+        { delete_branch_on_merge: true, allow_rebase_merge: false, allow_squash_merge: false }
+      end
 
       it 'writes just that key' do
         sync.run

@@ -64,7 +64,10 @@ class GithubSync
   # only way to satisfy both is a rebase.
   DESIRED_REPO_SETTINGS = {
     delete_branch_on_merge: true,
-    allow_rebase_merge: true,
+    # A merge commit is the only way PRs land: squash and rebase merging are
+    # both off (allow_merge_commit itself is deliberately left alone).
+    allow_rebase_merge: false,
+    allow_squash_merge: false,
     allow_update_branch: true,
   }.freeze
 

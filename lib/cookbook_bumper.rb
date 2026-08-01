@@ -69,7 +69,6 @@ class CookbookBumper
       github: @github,
       org: env.fetch('GITHUB_ORG'),
       public_supermarket: env.fetch('PUBLIC_SUPERMARKET_URL', 'https://supermarket.chef.io'),
-      local_supermarket: env.fetch('LOCAL_SUPERMARKET_URL', 'https://supermarket.osuosl.org'),
       do_not_upload: do_not_upload?,
       shell: @shell
     )

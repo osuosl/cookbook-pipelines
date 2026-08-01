@@ -142,6 +142,21 @@ RSpec.describe CookbookBumper do
       expect(shell_calls).to be_empty
     end
 
+    # Org cookbooks go to the Chef server AND the local supermarket -
+    # unlike community dependencies, which are never shared there.
+    context 'with uploads enabled' do
+      let(:env) { super().merge('DO_NOT_UPLOAD' => 'false') }
+
+      it 'uploads the cookbook frozen and shares it to the local supermarket' do
+        bumper(payload).run
+        expect(shell_calls).to include(
+          ['knife', 'cookbook', 'upload', 'osl-apache', '--freeze', '-o', anything],
+          ['knife', 'supermarket', 'share', 'osl-apache', 'Other',
+           '-m', 'https://supermarket.osuosl.org', '-o', anything,]
+        )
+      end
+    end
+
     it 'updates the CHANGELOG with the PR title' do
       bumper(payload).run
       changelog = File.read(File.join(workspace, 'cookbook', 'CHANGELOG.md'))

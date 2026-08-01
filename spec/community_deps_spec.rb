@@ -22,7 +22,6 @@ RSpec.describe CommunityDeps do
     described_class.new(
       github: github, org: 'osuosl-cookbooks',
       public_supermarket: 'https://supermarket.chef.io',
-      local_supermarket: 'https://supermarket.osuosl.org',
       shell: shell, server_universe: -> { universe }, out: out
     )
   end
@@ -114,14 +113,19 @@ RSpec.describe CommunityDeps do
   end
 
   describe '#upload' do
-    it 'downloads from the public supermarket and shares locally' do
+    it 'downloads from the public supermarket and uploads to the Chef server' do
       deps.upload('postfix', '6.1.8')
       expect(shell_calls[0]).to eq(%w(knife cookbook show postfix 6.1.8))
       expect(shell_calls[1]).to include('supermarket', 'download', 'postfix', '6.1.8', '-m',
                                         'https://supermarket.chef.io')
       expect(shell_calls[3]).to include('cookbook', 'upload', 'postfix', '--freeze')
-      expect(shell_calls[4]).to include('supermarket', 'share', 'postfix', '-m',
-                                        'https://supermarket.osuosl.org')
+      expect(shell_calls.length).to eq(4)
+    end
+
+    # The local supermarket holds only org cookbooks.
+    it 'never shares community cookbooks to the local supermarket' do
+      deps.upload('postfix', '6.1.8')
+      expect(shell_calls.flatten).not_to include('share')
     end
 
     # A version already on the Chef server is the routine case (uploaded by an
@@ -137,7 +141,7 @@ RSpec.describe CommunityDeps do
 
     it 'does nothing when do_not_upload is set' do
       quiet = described_class.new(
-        github: github, org: 'o', public_supermarket: 'x', local_supermarket: 'y',
+        github: github, org: 'o', public_supermarket: 'x',
         shell: shell, do_not_upload: true, out: StringIO.new
       )
       quiet.upload('postfix', '6.1.8')

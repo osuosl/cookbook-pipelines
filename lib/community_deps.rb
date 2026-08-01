@@ -10,9 +10,10 @@ require 'tmpdir'
 # GitHub org (org repos release through their own bump pipeline). For each
 # `depends` constraint the PR changed in metadata.rb, the newest version
 # satisfying the constraint is resolved against the public Supermarket API,
-# downloaded, uploaded frozen to the Chef server, and shared to the local
-# supermarket. A version already present on the Chef server is skipped and
-# treated as success so its environment pin still updates.
+# downloaded, and uploaded frozen to the Chef server. Community cookbooks are
+# never shared to the local supermarket - that holds only org cookbooks. A
+# version already present on the Chef server is skipped and treated as
+# success so its environment pin still updates.
 #
 # The dependency graph of everything uploaded is then walked (the public
 # Supermarket knows each version's dependencies) and any transitive community
@@ -35,12 +36,11 @@ class CommunityDeps
     JSON.parse(raw)
   end
 
-  def initialize(github:, org:, public_supermarket:, local_supermarket:, shell:, do_not_upload: false,
+  def initialize(github:, org:, public_supermarket:, shell:, do_not_upload: false,
                  server_universe: nil, out: $stdout)
     @github = github
     @org = org
     @public_supermarket = public_supermarket
-    @local_supermarket = local_supermarket
     @do_not_upload = do_not_upload
     @shell = shell
     @server_universe_fetcher = server_universe || DEFAULT_SERVER_UNIVERSE
@@ -109,7 +109,6 @@ class CommunityDeps
       @shell.call('knife', 'supermarket', 'download', name, version, '-m', @public_supermarket, '-f', tarball)
       @shell.call('tar', '-xzf', tarball, '-C', dir)
       @shell.call('knife', 'cookbook', 'upload', name, '--freeze', '-o', dir)
-      @shell.call('knife', 'supermarket', 'share', name, 'Other', '-m', @local_supermarket, '-o', dir)
     end
   end
 

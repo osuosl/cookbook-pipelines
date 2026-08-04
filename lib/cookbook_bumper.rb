@@ -42,7 +42,9 @@ class CookbookBumper
   MERGEABLE_STATES = %w(clean unstable).freeze
   ENV_LABEL_RE = %r{\Aenv/(\S+)\z}
   # Matches a 'Cookbook-Chain: <value>' line in a PR body or commit message.
-  CHAIN_DIRECTIVE_RE = /^cookbook-chain:[ \t]*(\S+)[ \t]*$/i
+  # PR bodies written in GitHub's web editor arrive with CRLF line endings,
+  # so a trailing \r must be tolerated ($ only matches before \n).
+  CHAIN_DIRECTIVE_RE = /^cookbook-chain:[ \t]*(\S+)[ \t]*\r?$/i
   # Chain values may be a Gerrit-Depends-On-style PR reference instead of a
   # free-form name: a full PR URL or [org/]repo#123.
   CHAIN_PR_URL_RE = %r{\Ahttps?://github\.com/[^/]+/([^/]+)/pull/(\d+)/?\z}i

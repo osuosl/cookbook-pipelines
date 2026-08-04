@@ -184,6 +184,17 @@ RSpec.describe CookbookBumper do
       end
     end
 
+    # GitHub's web editor submits PR bodies with CRLF line endings; the
+    # directive must still match (this silently broke the first real chain).
+    context 'with a Chain: directive in a CRLF PR body' do
+      let(:pr_labels) { [double(name: 'bump/minor'), double(name: 'env/default')] }
+      let(:pr_body) { "Part of the postfix update.\r\n\r\nCookbook-Chain: postfix-refactor\r\n" }
+
+      it 'still detects the chain' do
+        expect(bumper(payload).run['chain']).to eq('postfix-refactor')
+      end
+    end
+
     context 'with a Chain: directive in a commit message' do
       let(:pr_commits) do
         [

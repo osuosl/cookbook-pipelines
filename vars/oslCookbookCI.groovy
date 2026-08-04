@@ -21,7 +21,20 @@ def call(Map options = [:]) {
       }
     }
     stage('Lint & test') {
-      sh command
+      // Berkshelf's cookbook store is keyed by name-version, but our
+      // versions only move at release time - so a shared or reused cache
+      // routinely holds a stale copy of the same version with different
+      // metadata, and ChefSpec then hits impossible constraint conflicts
+      // ("percona ~> 4.0 AND ~> 5.0 required by osl-mysql-7.1.3").
+      // Every build gets its own store, created and destroyed here.
+      withEnv(["BERKSHELF_PATH=${env.WORKSPACE}/.berkshelf"]) {
+        sh 'rm -rf "$BERKSHELF_PATH"'
+        try {
+          sh command
+        } finally {
+          sh 'rm -rf "$BERKSHELF_PATH"'
+        }
+      }
     }
   }
 }

@@ -21,10 +21,11 @@ require_relative 'github_helpers'
 # in a commit message on the PR - labels can't carry free-form names without
 # per-repo label churn. Use the same chain name on every PR in the series.
 #
-# The release: merge the PR, bump the version in metadata.rb, prepend a
+# The release: upload any community cookbooks whose `depends` constraints
+# the PR changed (they must exist on the Chef server before this cookbook
+# can upload), then merge the PR, bump the version in metadata.rb, prepend a
 # CHANGELOG entry, tag, push to the PR's base branch (no branch name is ever
-# assumed), upload to the Chef server and supermarket, and upload any
-# community cookbooks whose `depends` constraints the PR changed. If any
+# assumed), and upload to the Chef server and supermarket. If any
 # environments were requested, a result file is written for the Jenkins
 # pipeline to hand to the environment-bumper job.
 class CookbookBumper
@@ -110,25 +111,21 @@ class CookbookBumper
     request[:chain] ||= chain_directive(pr)
     request[:chain] = normalize_chain(request[:chain])
 
+    # Community dependencies the PR introduces must be on the Chef server
+    # BEFORE this cookbook uploads: the server rejects a cookbook whose
+    # dependencies it cannot satisfy. Running this ahead of the merge also
+    # means a resolution failure leaves the PR untouched and fully
+    # retryable by re-applying the label. Uploading a community cookbook
+    # for a PR that then fails to merge is harmless - it is just an extra
+    # unpinned version on the server.
+    community = @community_deps.call(repo_path, pr_number)
+
     merge!
     delete_source_branch(pr)
 
     version = release(pr)
 
-    # The release is already published at this point, so a community upload
-    # failure must not abort the run: it would skip the PR comment and the
-    # environment bump, and the bump cannot be retried (the PR is merged).
-    # Uploading an already-frozen shared dependency is a routine non-zero exit.
-    community_error = nil
-    community = begin
-      @community_deps.call(repo_path, pr_number)
-    rescue StandardError => e
-      community_error = e
-      @out.puts "Community dependency upload failed: #{e.class}: #{e.message}"
-      []
-    end
-
-    announce(pr, request, version, community, community_error)
+    announce(pr, request, version, community)
 
     result = {
       'cookbooks' => [{ 'name' => repo_name, 'version' => version }] +
@@ -410,16 +407,12 @@ class CookbookBumper
                 '-m', @env.fetch('LOCAL_SUPERMARKET_URL', 'https://supermarket.osuosl.org'), '-o', parent)
   end
 
-  def announce(pr, request, version, community, community_error = nil)
+  def announce(pr, request, version, community)
     message = "Jenkins has merged this PR into `#{pr.base.ref}` and performed a " \
               "#{request[:level]}-level version bump to v#{version}."
     unless community.empty?
       uploads = community.map { |c| "#{c[:name]} #{c[:version]}" }.join(', ')
       message += " Community cookbooks uploaded: #{uploads}."
-    end
-    if community_error
-      message += ' :warning: Community dependency upload failed and needs a manual check: ' \
-                 "`#{community_error.message}`."
     end
     message += " Environment bump queued for: #{request[:envs].join(', ')}." unless request[:envs].empty?
     message += " Chained into `#{request[:chain]}`." if request[:chain]

@@ -411,25 +411,37 @@ RSpec.describe CookbookBumper do
       it 'includes them in the result cookbooks' do
         expect(bumper(payload).run['cookbooks']).to include('name' => 'postfix', 'version' => '6.1.8')
       end
+
+      # The chef server rejects a cookbook whose dependencies it cannot
+      # satisfy, so the community deps must exist before the upload.
+      it 'uploads community dependencies before merging the PR' do
+        order = []
+        allow(community_deps).to receive(:call) do
+          order << :community
+          []
+        end
+        allow(github).to receive(:merge_pull_request) do
+          order << :merge
+          true
+        end
+        bumper(payload).run
+        expect(order).to eq(%i(community merge))
+      end
     end
 
-    # The release is already published by this point and cannot be retried,
-    # so a community upload failure must not swallow the environment bump.
+    # Community resolution runs BEFORE the merge: a failure leaves the PR
+    # untouched and fully retryable by re-applying the label.
     context 'when a community dependency upload fails' do
       before do
-        allow(community_deps).to receive(:call).and_raise(StandardError, 'cookbook is frozen')
+        allow(community_deps).to receive(:call)
+          .and_raise(CommunityDeps::Error, "no version of 'postfix' satisfies '~> 99'")
       end
 
-      it 'still finishes the release and queues the environment bump' do
-        result = bumper(payload).run
-        expect(result['cookbooks']).to eq([{ 'name' => 'osl-apache', 'version' => '2.4.0' }])
-        expect(File).to exist(env['RESULT_FILE'])
-      end
-
-      it 'reports the failure on the PR' do
-        bumper(payload).run
-        expect(github).to have_received(:add_comment)
-          .with('osuosl-cookbooks/osl-apache', 42, /Community dependency upload failed.*cookbook is frozen/m)
+      it 'aborts before merging or releasing anything' do
+        expect { bumper(payload).run }.to raise_error(CommunityDeps::Error, /postfix/)
+        expect(github).not_to have_received(:merge_pull_request)
+        expect(repo).not_to have_received(:add_tag)
+        expect(File).not_to exist(env['RESULT_FILE'])
       end
     end
 

@@ -143,6 +143,21 @@ RSpec.describe EnvironmentBumper do
       expect(github).to have_received(:update_pull_request)
         .with('osuosl/chef-repo', 55, body: /existing body\n- Added bump/)
     end
+
+    # The full report goes in the comment; the description only grows a
+    # one-line inventory bullet, or it degenerates into stacked report
+    # blocks with repeating "Newly pinned" headings.
+    it 'appends a single-line inventory bullet to the description' do
+      bumper('chain' => 'postfix-refactor',
+             'cookbooks' => 'osl-postfix:2.1.0,brand-new-dep:3.2.0').run
+      expect(github).to have_received(:update_pull_request) do |_repo, _num, body:|
+        appended = body.delete_prefix("existing body\n")
+        expect(appended).not_to include("\n")
+        expect(appended).to match(/\A- Added bump of .*brand-new-dep.*Newly pinned: brand-new-dep in production\./)
+      end
+      expect(github).to have_received(:add_comment)
+        .with('osuosl/chef-repo', 55, /\*\*Newly pinned\*\*/)
+    end
   end
 
   it 'raises on malformed cookbook pins' do

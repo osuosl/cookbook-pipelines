@@ -78,10 +78,20 @@ class CommunityDeps
   end
 
   # Newest version on the public supermarket satisfying the constraint(s).
+  # A DEPRECATED cookbook stops the release outright: knife refuses to
+  # download one anyway (while exiting 0, leaving a baffling tar error), and
+  # silently building on abandoned cookbooks is how they fossilize into the
+  # infrastructure. Upload it by hand if it is genuinely still wanted.
   def resolve(name, constraint)
     constraints = Array(constraint || '>= 0')
     constraints = ['>= 0'] if constraints.empty?
     body = fetch_json("#{@public_supermarket}/api/v1/cookbooks/#{name}")
+    if body['deprecated']
+      replacement = body['replacement'] ? "replacement: #{body['replacement']}" : 'no replacement defined'
+      raise Error, "'#{name}' is DEPRECATED on the public supermarket (#{replacement}). " \
+                   'Not uploading it automatically - migrate off it, or upload it manually ' \
+                   'if it is still needed.'
+    end
     versions = body['versions'].map { |url| url.split('/').last.tr('_', '.') }
     requirement = Gem::Requirement.new(constraints)
     version = versions.map { |v| Gem::Version.new(v) }.select { |v| requirement.satisfied_by?(v) }.max

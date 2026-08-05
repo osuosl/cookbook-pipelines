@@ -42,6 +42,7 @@ RSpec.describe CookbookBumper do
       delete_branch: true,
       add_comment: true,
       add_labels_to_an_issue: true,
+      remove_label: true,
       permission_level: double(permission: permission),
       combined_status: double(state: commit_state)
     )
@@ -454,6 +455,54 @@ RSpec.describe CookbookBumper do
         expect(repo).not_to have_received(:add_tag)
         expect(File).not_to exist(env['RESULT_FILE'])
       end
+
+      it 'reports the failure on the PR with retry guidance' do
+        expect { bumper(payload).run }.to raise_error(CommunityDeps::Error)
+        expect(github).to have_received(:add_comment)
+          .with('osuosl-cookbooks/osl-apache', 42,
+                %r{Release failed before the PR was merged.*apply the `bump/minor` label again.*postfix}m)
+      end
+
+      # The 'labeled' event only fires on the transition, so a lingering
+      # label would make retrying a remove-then-re-add dance and leave the
+      # PR looking released.
+      it 'removes the bump label so retrying is a single re-apply' do
+        expect { bumper(payload).run }.to raise_error(CommunityDeps::Error)
+        expect(github).to have_received(:remove_label)
+          .with('osuosl-cookbooks/osl-apache', 42, 'bump/minor')
+      end
+    end
+
+    # Failures are reported on the PR itself - digging through Jenkins to
+    # discover a silent failure cost real time. Post-merge failures carry
+    # different guidance, since re-labelling cannot retry a merged PR.
+    context 'when the release fails after the merge' do
+      let(:env) { super().merge('BUILD_URL' => 'https://jenkins.example.org/job/cookbook-uploader/7/') }
+
+      before do
+        allow(repo).to receive(:push).and_raise(StandardError, 'remote hung up')
+      end
+
+      it 'reports the failure with recovery guidance and the build link' do
+        expect { bumper(payload).run }.to raise_error(StandardError, /remote hung up/)
+        expect(github).to have_received(:add_comment)
+          .with('osuosl-cookbooks/osl-apache', 42,
+                /Release failed after the PR was merged.*manual recovery.*remote hung up.*jenkins.example.org/m)
+        expect(github).to have_received(:remove_label)
+          .with('osuosl-cookbooks/osl-apache', 42, 'bump/minor')
+      end
+    end
+
+    it 'keeps the bump label on a successful release' do
+      bumper(payload).run
+      expect(github).not_to have_received(:remove_label)
+    end
+
+    it 'never masks the original error when failure reporting itself fails' do
+      allow(community_deps).to receive(:call).and_raise(CommunityDeps::Error, 'resolution failed')
+      allow(github).to receive(:add_comment).and_raise(Octokit::Forbidden)
+      allow(github).to receive(:remove_label).and_raise(Octokit::Forbidden)
+      expect { bumper(payload).run }.to raise_error(CommunityDeps::Error, /resolution failed/)
     end
 
     it 'emits chain as a string so Jenkins readJSON cannot turn nil into "null"' do

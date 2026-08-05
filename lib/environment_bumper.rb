@@ -218,6 +218,19 @@ class EnvironmentBumper
     "\n\n**Newly pinned** (not previously in these environments):\n#{lines.join("\n")}"
   end
 
+  # One bullet for the chain PR's running inventory. Kept to a single line
+  # deliberately; the per-release comment holds the full report.
+  def inventory_line(summary, added, skipped)
+    line = "- Added bump of #{summary}."
+    line += " Includes changes from: #{pr_link}." if pr_link
+    unless added.empty?
+      pins = added.map { |name, env_names| "#{name} in #{env_names.join('/')}" }
+      line += " Newly pinned: #{pins.join(', ')}."
+    end
+    line += " Left unchanged (not pinned): #{skipped.join(', ')}." unless skipped.empty?
+    line
+  end
+
   def upsert_pr(default_branch, branch, envs, existing_branch, changed:, skipped:, added:)
     open_pr = find_open_pr(branch) if existing_branch || !chain
 
@@ -228,7 +241,11 @@ class EnvironmentBumper
       note += added_note(added)
       note += skipped_note(skipped, envs)
       @github.add_comment(chef_repo, open_pr.number, note)
-      @github.update_pull_request(chef_repo, open_pr.number, body: "#{open_pr.body}\n- #{note}")
+      # The comment above carries the full report; the description only
+      # grows its one-line inventory, so it stays a readable list instead
+      # of accumulating stacked report blocks with repeated headings.
+      @github.update_pull_request(chef_repo, open_pr.number,
+                                  body: "#{open_pr.body}\n#{inventory_line(summary, added, skipped)}")
       @out.puts "Updated existing PR: #{open_pr.html_url}"
       open_pr
     else

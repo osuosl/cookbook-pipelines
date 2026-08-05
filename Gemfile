@@ -7,7 +7,7 @@ source 'https://rubygems.org'
 # cinc-workstation itself moves.
 gem 'faraday-http-cache', '2.7.0'
 gem 'git', '4.4.0'
-gem 'octokit', '5.6.1'
+gem 'octokit', '10.0.0'
 
 group :development, :test do
   gem 'rake'

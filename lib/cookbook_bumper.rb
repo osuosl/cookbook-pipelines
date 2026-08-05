@@ -92,6 +92,20 @@ class CookbookBumper
     verify_repo_in_org!
 
     pr = fetch_pr
+    begin
+      release_request(pr, request)
+    rescue StandardError => e
+      # A silent failure costs real debugging time: anything that stops a
+      # requested release is reported on the PR itself, not just buried in
+      # the Jenkins log.
+      report_failure(e, request)
+      raise
+    end
+  end
+
+  private
+
+  def release_request(pr, request)
     raise Error, 'PR is already merged.' if pr.merged
 
     authorize_actor!
@@ -141,8 +155,6 @@ class CookbookBumper
     write_result(result) unless request[:envs].empty?
     result
   end
-
-  private
 
   def repo_path
     @payload['repository']['full_name']
@@ -255,6 +267,35 @@ class CookbookBumper
 
   def merge!
     @github.merge_pull_request(repo_path, pr_number)
+    @merged = true
+  end
+
+  # Failures before the merge are retryable by applying the label again;
+  # failures after it may need the manual recovery steps from the docs.
+  # Reporting must never mask the original error.
+  def report_failure(error, request)
+    # The 'labeled' event only fires on the transition, so a lingering bump
+    # label would make retrying a remove-then-re-add dance and misrepresent
+    # the PR as released. Removing it makes the label truthful and retry a
+    # single click; removals never trigger the pipeline.
+    remove_bump_label(request)
+    guidance = if @merged
+                 'after the PR was merged - the release may be incomplete and need manual recovery (see the docs)'
+               else
+                 'before the PR was merged - nothing was released; fix the cause, then apply the ' \
+                   "`bump/#{request[:level]}` label again to retry"
+               end
+    message = ":x: Release failed #{guidance}:\n\n```\n#{error.message}\n```"
+    message += "\nBuild: #{@env['BUILD_URL']}" if @env['BUILD_URL']
+    @github.add_comment(repo_path, pr_number, message)
+  rescue StandardError => e
+    @out.puts "Could not report the failure on the PR: #{e.class}: #{e.message}"
+  end
+
+  def remove_bump_label(request)
+    @github.remove_label(repo_path, pr_number, "bump/#{request[:level]}")
+  rescue StandardError => e
+    @out.puts "Could not remove the bump label: #{e.class}: #{e.message}"
   end
 
   # GitHub computes mergeability lazily; 'unknown' means "not done yet".

@@ -110,6 +110,24 @@ RSpec.describe CommunityDeps do
     it 'raises when nothing satisfies' do
       expect { deps.resolve('postfix', '>= 99') }.to raise_error(CommunityDeps::Error, /no version/)
     end
+
+    # Deprecated cookbooks stop the release with a clear message instead of
+    # knife's exit-0 refusal and the tar error it caused (the sudo cookbook).
+    it 'refuses deprecated cookbooks outright' do
+      stub_request(:get, 'https://supermarket.chef.io/api/v1/cookbooks/sudo')
+        .to_return(status: 200, body: JSON.generate('deprecated' => true, 'replacement' => nil))
+      expect { deps.resolve('sudo', '~> 5.4') }
+        .to raise_error(CommunityDeps::Error, /'sudo' is DEPRECATED.*no replacement.*upload it manually/m)
+    end
+
+    it 'names the replacement of a deprecated cookbook when one exists' do
+      stub_request(:get, 'https://supermarket.chef.io/api/v1/cookbooks/cron')
+        .to_return(status: 200, body: JSON.generate(
+          'deprecated' => true, 'replacement' => 'https://supermarket.chef.io/cookbooks/newcron'
+        ))
+      expect { deps.resolve('cron', nil) }
+        .to raise_error(CommunityDeps::Error, %r{replacement: https://.*newcron})
+    end
   end
 
   describe '#upload' do

@@ -6,7 +6,7 @@ source 'https://rubygems.org'
 # and local runs exercise what production has. Bump them only when
 # cinc-workstation itself moves.
 gem 'faraday-http-cache', '2.7.0'
-gem 'git', '4.4.0'
+gem 'git', '5.0.1'
 gem 'octokit', '5.6.1'
 
 group :development, :test do

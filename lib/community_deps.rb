@@ -1,5 +1,5 @@
-require 'English'
 require 'json'
+require 'mixlib/shellout'
 require 'net/http'
 require 'tmpdir'
 
@@ -29,11 +29,32 @@ class CommunityDeps
 
   # The Chef server's full version index, fetched with the pipeline's knife
   # credentials. Injectable for tests.
+  #
+  # /universe is not among the endpoints the server maps onto its default
+  # org, so unlike `knife cookbook upload` this only works when knife.rb's
+  # chef_server_url carries the /organizations/<org> path - hence the hint.
   DEFAULT_SERVER_UNIVERSE = lambda do
-    raw = `knife raw /universe`
-    raise Error, 'failed to fetch /universe from the chef server' unless $CHILD_STATUS.success?
+    knife = Mixlib::ShellOut.new('knife', 'raw', '/universe').run_command
+    if knife.error?
+      detail = [knife.stderr, knife.stdout].map(&:strip).reject(&:empty?).join("\n")
+      raise Error, 'failed to fetch /universe from the chef server ' \
+                   "(does knife.rb's chef_server_url include /organizations/<org>?):\n#{detail}"
+    end
 
-    JSON.parse(raw)
+    CommunityDeps.parse_universe(knife.stdout)
+  end
+
+  # knife's own log lines share stdout with the JSON when knife.rb sets
+  # `log_location STDOUT` (the Jenkins controller's does), and the
+  # "Using configuration from" line is emitted before any option could
+  # redirect it. Skip ahead to the document rather than parse the noise.
+  def self.parse_universe(output)
+    json = output[/^[\[{].*/m]
+    raise Error, "knife raw /universe returned no JSON:\n#{output.strip}" unless json
+
+    JSON.parse(json)
+  rescue JSON::ParserError => e
+    raise Error, "could not parse /universe from the chef server: #{e.message}"
   end
 
   def initialize(github:, org:, public_supermarket:, shell:, do_not_upload: false,

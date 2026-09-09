@@ -48,7 +48,7 @@ RSpec.describe CookbookBumper do
     )
   end
   let(:repo) do
-    double('repo', checkout: true, add: true, commit: true, add_tag: true, push: true)
+    double('repo', checkout: true, add: true, commit: true, tag_add: true, push: true)
   end
   let(:git) do
     git = double('git')
@@ -129,7 +129,7 @@ RSpec.describe CookbookBumper do
     it 'commits, tags, and pushes to the PR base branch' do
       bumper(payload).run
       expect(repo).to have_received(:checkout).with('master')
-      expect(repo).to have_received(:add_tag).with('v2.4.0')
+      expect(repo).to have_received(:tag_add).with('v2.4.0')
       expect(repo).to have_received(:push).with('origin', 'master', tags: true)
     end
 
@@ -392,7 +392,7 @@ RSpec.describe CookbookBumper do
         expect(bumper(payload).run).to be_nil
         expect(github).to have_received(:merge_pull_request).with('osuosl-cookbooks/osl-apache', 42)
         expect(github).to have_received(:delete_branch)
-        expect(repo).not_to have_received(:add_tag)
+        expect(repo).not_to have_received(:tag_add)
         expect(shell_calls).to be_empty
         expect(File).not_to exist(env['RESULT_FILE'])
       end
@@ -452,7 +452,7 @@ RSpec.describe CookbookBumper do
       it 'aborts before merging or releasing anything' do
         expect { bumper(payload).run }.to raise_error(CommunityDeps::Error, /postfix/)
         expect(github).not_to have_received(:merge_pull_request)
-        expect(repo).not_to have_received(:add_tag)
+        expect(repo).not_to have_received(:tag_add)
         expect(File).not_to exist(env['RESULT_FILE'])
       end
 

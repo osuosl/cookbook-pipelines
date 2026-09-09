@@ -61,10 +61,11 @@ cookbook via JCasC job-dsl.
 
 - **Ruby comes from cinc-workstation, not bundler.** The pipelines run
   `/opt/cinc-workstation/embedded/bin/ruby` on the Jenkins controller. That
-  omnibus already ships ruby 3.4, `octokit`, `git` and `faraday-http-cache`,
+  omnibus already ships ruby 3.4, `octokit`, `git`, `faraday-http-cache` and
+  `mixlib-shellout`,
   and it is where `knife` comes from — so nothing is installed at release
   time and there is no `bundle install` in any pipeline.
-- The Gemfile pins those three gems to the exact versions cinc-workstation
+- The Gemfile pins those gems to the exact versions cinc-workstation
   ships so CI exercises what production runs. Bump them only when
   cinc-workstation itself moves, and update `.ruby-version` / rubocop's
   `TargetRubyVersion` / the CI matrix together.

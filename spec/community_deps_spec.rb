@@ -26,6 +26,52 @@ RSpec.describe CommunityDeps do
     )
   end
 
+  describe '.parse_universe' do
+    let(:universe_json) { JSON.pretty_generate('yum' => { '7.4.13' => {} }) }
+
+    it 'parses plain JSON' do
+      expect(described_class.parse_universe(universe_json)).to eq('yum' => { '7.4.13' => {} })
+    end
+
+    it 'skips knife log lines that precede the JSON when knife logs to stdout' do
+      output = "INFO: Using configuration from /var/lib/jenkins/.cinc/knife.rb\n#{universe_json}"
+      expect(described_class.parse_universe(output)).to eq('yum' => { '7.4.13' => {} })
+    end
+
+    it 'raises a readable error when there is no JSON at all' do
+      expect { described_class.parse_universe("INFO: Using configuration from /x\n") }
+        .to raise_error(CommunityDeps::Error, %r{knife raw /universe returned no JSON})
+    end
+
+    it 'raises a readable error on malformed JSON' do
+      expect { described_class.parse_universe("{\n  \"yum\": \n") }
+        .to raise_error(CommunityDeps::Error, %r{could not parse /universe})
+    end
+  end
+
+  describe 'DEFAULT_SERVER_UNIVERSE' do
+    let(:fetch) { described_class::DEFAULT_SERVER_UNIVERSE }
+
+    def stub_knife_raw(stdout, stderr, success)
+      knife = instance_double(Mixlib::ShellOut, stdout: stdout, stderr: stderr, error?: !success)
+      allow(knife).to receive(:run_command).and_return(knife)
+      allow(Mixlib::ShellOut).to receive(:new).with('knife', 'raw', '/universe').and_return(knife)
+    end
+
+    it 'runs knife raw /universe and parses its stdout, ignoring stderr' do
+      stub_knife_raw("INFO: Using configuration from /x\n{\"yum\": {}}\n", 'WARN: noise', true)
+      expect(fetch.call).to eq('yum' => {})
+    end
+
+    it 'raises with knife output and an org-path hint when knife fails' do
+      stub_knife_raw('', 'ERROR: Server responded with error 404 "Not Found"', false)
+      expect { fetch.call }.to raise_error(CommunityDeps::Error) { |e|
+        expect(e.message).to include('/organizations/<org>')
+        expect(e.message).to include('404 "Not Found"')
+      }
+    end
+  end
+
   def stub_pr_files(patch)
     allow(github).to receive(:pull_request_files)
       .with('osuosl-cookbooks/osl-apache', 42)

@@ -402,7 +402,7 @@ class CookbookBumper
 
     repo.add(all: true)
     repo.commit("Automatic #{level_of(pr)}-level version bump to v#{version} by Jenkins")
-    repo.add_tag("v#{version}")
+    repo.tag_add("v#{version}")
     repo.push('origin', base, tags: true)
 
     upload_cookbook(workdir)

@@ -5,7 +5,7 @@ source 'https://rubygems.org'
 # runtime gems below are pinned to the exact versions the omnibus ships so CI
 # and local runs exercise what production has. Bump them only when
 # cinc-workstation itself moves.
-gem 'faraday-http-cache', '2.7.0'
+gem 'faraday-http-cache', '3.0.0'
 gem 'git', '5.2.0'
 gem 'mixlib-shellout', '3.4.10'
 gem 'octokit', '5.6.1'

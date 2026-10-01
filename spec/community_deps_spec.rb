@@ -177,8 +177,11 @@ RSpec.describe CommunityDeps do
   end
 
   describe '#upload' do
+    let(:postfix) { { name: 'postfix', version: '6.1.8' } }
+    let(:yum) { { name: 'yum', version: '7.4.13' } }
+
     it 'downloads from the public supermarket and uploads to the Chef server' do
-      deps.upload('postfix', '6.1.8')
+      deps.upload([postfix])
       expect(shell_calls[0]).to eq(%w(knife cookbook show postfix 6.1.8))
       expect(shell_calls[1]).to include('supermarket', 'download', 'postfix', '6.1.8', '-m',
                                         'https://supermarket.chef.io')
@@ -186,9 +189,20 @@ RSpec.describe CommunityDeps do
       expect(shell_calls.length).to eq(4)
     end
 
+    # knife refuses a cookbook whose dependencies are neither on the server
+    # nor in the same upload, so a dependent and its dependency must go up
+    # together.
+    it 'uploads several cookbooks in a single knife call' do
+      deps.upload([postfix, yum])
+      uploads = shell_calls.select { |c| c[0, 3] == %w(knife cookbook upload) }
+      expect(uploads.length).to eq(1)
+      expect(uploads.first).to include('postfix', 'yum', '--freeze')
+      expect(shell_calls.count { |c| c[0, 3] == %w(knife supermarket download) }).to eq(2)
+    end
+
     # The local supermarket holds only org cookbooks.
     it 'never shares community cookbooks to the local supermarket' do
-      deps.upload('postfix', '6.1.8')
+      deps.upload([postfix])
       expect(shell_calls.flatten).not_to include('share')
     end
 
@@ -198,8 +212,15 @@ RSpec.describe CommunityDeps do
       let(:server_versions) { ['postfix 6.1.8'] }
 
       it 'skips the download/upload/share entirely' do
-        deps.upload('postfix', '6.1.8')
+        deps.upload([postfix])
         expect(shell_calls).to eq([%w(knife cookbook show postfix 6.1.8)])
+      end
+
+      it 'leaves it out of the batch but still uploads the rest' do
+        deps.upload([postfix, yum])
+        upload = shell_calls.find { |c| c[0, 3] == %w(knife cookbook upload) }
+        expect(upload).to include('yum')
+        expect(upload).not_to include('postfix')
       end
     end
 
@@ -208,7 +229,7 @@ RSpec.describe CommunityDeps do
         github: github, org: 'o', public_supermarket: 'x',
         shell: shell, do_not_upload: true, out: StringIO.new
       )
-      quiet.upload('postfix', '6.1.8')
+      quiet.upload([postfix])
       expect(shell_calls).to be_empty
     end
   end
@@ -254,6 +275,19 @@ RSpec.describe CommunityDeps do
         )
       end
 
+      # The isc_kea -> chef_auto_accumulator case: uploading the direct dep
+      # before its missing dependency is resolved makes knife refuse it.
+      it 'uploads a direct dep together with its missing transitive deps' do
+        stub_version_deps('postfix', '6.1.8', 'yum-epel' => '>= 4.0')
+        stub_cookbook_versions('yum-epel', %w(5.0.0))
+        stub_version_deps('yum-epel', '5.0.0')
+
+        deps.call('osuosl-cookbooks/osl-apache', 42)
+        uploads = shell_calls.select { |c| c[0, 3] == %w(knife cookbook upload) }
+        expect(uploads.length).to eq(1)
+        expect(uploads.first).to include('postfix', 'yum-epel')
+      end
+
       it 'leaves a dep alone when the server already satisfies it' do
         stub_version_deps('postfix', '6.1.8', 'yum-epel' => '>= 4.0')
         universe['yum-epel'] = { '4.1.2' => {} }
@@ -291,6 +325,17 @@ RSpec.describe CommunityDeps do
 
         expect { deps.call('osuosl-cookbooks/osl-apache', 42) }
           .to raise_error(CommunityDeps::Error, /conflicting requirements: yum-epel 5\.0\.0/)
+      end
+
+      it 'uploads nothing when resolution fails partway through' do
+        stub_version_deps('postfix', '6.1.8', 'yum-epel' => '>= 4.0', 'yum' => '>= 0')
+        stub_cookbook_versions('yum-epel', %w(5.0.0))
+        stub_version_deps('yum-epel', '5.0.0')
+        stub_cookbook_versions('yum', %w(7.4.13))
+        stub_version_deps('yum', '7.4.13', 'yum-epel' => '< 5.0')
+
+        expect { deps.call('osuosl-cookbooks/osl-apache', 42) }.to raise_error(CommunityDeps::Error)
+        expect(shell_calls).to be_empty
       end
     end
   end

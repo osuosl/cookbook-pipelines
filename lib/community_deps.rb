@@ -15,12 +15,17 @@ require 'tmpdir'
 # version already present on the Chef server is skipped and treated as
 # success so its environment pin still updates.
 #
-# The dependency graph of everything uploaded is then walked (the public
+# The dependency graph of everything resolved is then walked (the public
 # Supermarket knows each version's dependencies) and any transitive community
 # dependency the Chef server cannot already satisfy is uploaded and pinned
 # the same way. A dependency the server *can* satisfy is left untouched:
 # upgrading pins nobody asked for is not this job's call, and the chef-repo
 # environment pin check reports unpinned floats.
+#
+# Nothing is uploaded until the whole closure is resolved, and then it all
+# goes up in one knife call: knife refuses a cookbook whose dependencies are
+# neither on the server nor part of the same upload, so uploading a direct
+# dependency ahead of its own missing dependencies always fails.
 class CommunityDeps
   class Error < StandardError
   end
@@ -75,11 +80,11 @@ class CommunityDeps
     direct = changed_constraints(repo_path, pr_number).filter_map do |name, constraint|
       next unless community?(name)
 
-      version = resolve(name, constraint)
-      upload(name, version)
-      { name: name, version: version }
+      { name: name, version: resolve(name, constraint) }
     end
-    direct + transitive_closure(direct)
+    cookbooks = direct + transitive_closure(direct)
+    upload(cookbooks)
+    cookbooks
   end
 
   # Parse the PR's metadata.rb patch for depends lines that were added or
@@ -121,8 +126,11 @@ class CommunityDeps
     version.to_s
   end
 
-  def upload(name, version)
-    @out.puts "Uploading community cookbook #{name} #{version}..."
+  # Upload [{name:, version:}] to the Chef server in a single knife call so
+  # cookbooks that depend on one another satisfy each other's dependency
+  # check.
+  def upload(cookbooks)
+    cookbooks.each { |c| @out.puts "Uploading community cookbook #{c[:name]} #{c[:version]}..." }
     return if @do_not_upload
 
     # The resolved version being on the Chef server already is the routine
@@ -130,16 +138,22 @@ class CommunityDeps
     # frozen version exits non-zero, and the failure would also drop the dep
     # from the environment pin update - so an existing version is success,
     # not an error.
-    if uploaded?(name, version)
-      @out.puts "#{name} #{version} is already on the Chef server, skipping upload."
-      return
-    end
+    missing = cookbooks.reject do |c|
+      next false unless uploaded?(c[:name], c[:version])
 
-    Dir.mktmpdir("community-#{name}-") do |dir|
-      tarball = File.join(dir, "#{name}.tar.gz")
-      @shell.call('knife', 'supermarket', 'download', name, version, '-m', @public_supermarket, '-f', tarball)
-      @shell.call('tar', '-xzf', tarball, '-C', dir)
-      @shell.call('knife', 'cookbook', 'upload', name, '--freeze', '-o', dir)
+      @out.puts "#{c[:name]} #{c[:version]} is already on the Chef server, skipping upload."
+      true
+    end
+    return if missing.empty?
+
+    Dir.mktmpdir('community-') do |dir|
+      missing.each do |c|
+        tarball = File.join(dir, "#{c[:name]}.tar.gz")
+        @shell.call('knife', 'supermarket', 'download', c[:name], c[:version], '-m', @public_supermarket,
+                    '-f', tarball)
+        @shell.call('tar', '-xzf', tarball, '-C', dir)
+      end
+      @shell.call('knife', 'cookbook', 'upload', *missing.map { |c| c[:name] }, '--freeze', '-o', dir)
     end
   end
 
@@ -153,15 +167,15 @@ class CommunityDeps
 
   private
 
-  # Walk the dependency graph of everything just uploaded and upload any
+  # Walk the dependency graph of everything resolved and collect every
   # community dependency the Chef server cannot already satisfy. Constraints
   # from every dependent of a missing cookbook are merged; conflicting
-  # requirements on something already uploaded are an error rather than a
+  # requirements on something already resolved are an error rather than a
   # guess.
   def transitive_closure(seed)
     resolved = seed.to_h { |c| [c[:name], c[:version]] }
     constraints = Hash.new { |h, k| h[k] = [] }
-    uploaded = []
+    added = []
     queue = seed.map { |c| c[:name] }
     until queue.empty?
       name = queue.shift
@@ -175,13 +189,12 @@ class CommunityDeps
         next if server_satisfies?(dep, constraint)
 
         version = resolve(dep, constraints[dep])
-        upload(dep, version)
         resolved[dep] = version
-        uploaded << { name: dep, version: version }
+        added << { name: dep, version: version }
         queue << dep
       end
     end
-    uploaded
+    added
   end
 
   # Dependency constraints of a specific cookbook version, from the public
@@ -194,7 +207,7 @@ class CommunityDeps
   def verify_resolved!(name, version, constraint)
     return if constraint.nil? || Gem::Requirement.new(constraint).satisfied_by?(Gem::Version.new(version))
 
-    raise Error, "conflicting requirements: #{name} #{version} was uploaded but another dependency needs #{constraint}"
+    raise Error, "conflicting requirements: #{name} #{version} was resolved but another dependency needs #{constraint}"
   end
 
   # An org cookbook found transitively is never uploaded here - it releases

@@ -39,9 +39,12 @@ pipeline {
       steps {
         script {
           def result = readJSON(file: env.RESULT_FILE)
+          // Wait, so disableConcurrentBuilds covers the bump too: the next
+          // release checks its pins against the chain branch this one
+          // writes, which must exist by then.
           build(
             job: 'environment-bumper',
-            wait: false,
+            wait: true,
             parameters: [
               string(name: 'cookbooks', value: result.cookbooks.collect { "${it.name}:${it.version}" }.join(',')),
               string(name: 'envs', value: result.envs),

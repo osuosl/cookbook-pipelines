@@ -2,6 +2,7 @@ require 'digest'
 require 'git'
 require 'json'
 
+require_relative 'chef_repo_environments'
 require_relative 'github_helpers'
 
 # Pins cookbook versions in chef-repo environment files and opens (or updates)
@@ -104,7 +105,7 @@ class EnvironmentBumper
   # bumps get a content-addressed branch name so retries reuse it.
   def check_out_bump_branch(repo)
     branch = if chain
-               "jenkins/chain-#{chain}"
+               ChefRepoEnvironments.chain_branch(chain)
              else
                summary = cookbooks.map { |c| "#{c[:name]}-#{c[:version]}" }.join(',')
                digest = Digest::SHA1.hexdigest("#{summary}|#{@env['envs']}")[0, 7]
@@ -125,26 +126,12 @@ class EnvironmentBumper
     repo.branches.any? { |b| b.remote && b.name == branch }
   end
 
-  # Expand the envs parameter into { env_name => addable }. Explicitly named
-  # environments (and the curated default set) may gain NEW pins; environments
-  # swept in by 'all' are update-only, so one label can't inject a brand-new
-  # cookbook into every environment.
+  # Expand the envs parameter into { env_name => addable }; see
+  # ChefRepoEnvironments.expand.
   def environments(workdir)
-    entries = {}
-    @env.fetch('envs').split(',').map(&:strip).reject(&:empty?).each do |token|
-      case token
-      when 'all'
-        Dir.glob(File.join(workdir, 'environments/*.json')).each do |f|
-          name = File.basename(f, '.json')
-          entries[name] = false unless entries.key?(name)
-        end
-      when 'default'
-        default_environments.each { |e| entries[e] = true }
-      else
-        entries[token] = true
-      end
-    end
-    entries
+    all = Dir.glob(File.join(workdir, 'environments/*.json')).map { |f| File.basename(f, '.json') }
+    ChefRepoEnvironments.expand(@env.fetch('envs').split(',').map(&:strip).reject(&:empty?),
+                                all: all, default: default_environments)
   end
 
   # Update pins everywhere selected; add missing pins only where addable.

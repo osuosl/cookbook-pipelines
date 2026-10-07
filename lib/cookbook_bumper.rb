@@ -2,6 +2,7 @@ require 'English'
 require 'git'
 require 'json'
 
+require_relative 'chef_repo_environments'
 require_relative 'community_deps'
 require_relative 'github_helpers'
 
@@ -113,7 +114,7 @@ class CookbookBumper
 
     # bump/skip: merge only, no version bump, upload or environment bump.
     if request[:level] == SKIP
-      merge!
+      merge!(pr)
       delete_source_branch(pr)
       @github.add_comment(repo_path, pr_number,
                           'Merged without a release (`bump/skip`): no version bump, upload or environment change.')
@@ -130,13 +131,25 @@ class CookbookBumper
     # Community dependencies the PR introduces must be on the Chef server
     # BEFORE this cookbook uploads: the server rejects a cookbook whose
     # dependencies it cannot satisfy. Running this ahead of the merge also
-    # means a resolution failure leaves the PR untouched and fully
-    # retryable by re-applying the label. Uploading a community cookbook
-    # for a PR that then fails to merge is harmless - it is just an extra
-    # unpinned version on the server.
-    community = @community_deps.call(repo_path, pr_number)
+    # means a resolution failure, or a release that would leave a chef-repo
+    # environment failing env-pin-check, leaves the PR untouched and fully
+    # retryable by re-applying the label. A community cookbook uploaded for a
+    # PR that then fails to merge stays as an extra unpinned version on the
+    # server, which that check has already found breaks nothing.
+    community = @community_deps.call(
+      repo_path, pr_number,
+      head_sha: pr.head.sha,
+      next_version: lambda { |metadata|
+        # The same match bump_metadata makes after the merge, so a version
+        # line it can't bump stops the release here instead.
+        current = VERSION_RE.match(metadata) or raise Error, "no version line found in #{METADATA_FILE} " \
+                                                             "at #{pr.head.sha}"
+        inc_version(current[3], LEVELS.index(request[:level]))
+      },
+      env_pins: -> { environment_pins.environments(request[:envs], chain: request[:chain]) }
+    )
 
-    merge!
+    merge!(pr)
     delete_source_branch(pr)
 
     version = release(pr)
@@ -154,6 +167,16 @@ class CookbookBumper
     }
     write_result(result) unless request[:envs].empty?
     result
+  end
+
+  # chef-repo pins, as they stand where this release's environment bump will
+  # land, for checks that must pass before the merge.
+  def environment_pins
+    ChefRepoEnvironments::Pins.new(
+      github: @github,
+      chef_repo: @env.fetch('CHEF_REPO'),
+      default_environments: @env.fetch('DEFAULT_ENVIRONMENTS', '').split(',')
+    )
   end
 
   def repo_path
@@ -265,8 +288,11 @@ class CookbookBumper
     @github.pull_request(repo_path, pr_number)
   end
 
-  def merge!
-    @github.merge_pull_request(repo_path, pr_number)
+  # Merges exactly the head commit that was checked: the bot's admin rights
+  # bypass branch protection, so a commit pushed since would otherwise merge
+  # unchecked. GitHub refuses the merge if the head has moved.
+  def merge!(pr)
+    @github.merge_pull_request(repo_path, pr_number, '', sha: pr.head.sha)
     @merged = true
   end
 
@@ -456,6 +482,10 @@ class CookbookBumper
     unless community.empty?
       uploads = community.map { |c| "#{c[:name]} #{c[:version]}" }.join(', ')
       message += " Community cookbooks uploaded: #{uploads}."
+    end
+    unless @community_deps.left_alone.empty?
+      message += ' Not re-pinned (no version constraint in this cookbook): ' \
+                 "#{@community_deps.left_alone.join(', ')}."
     end
     message += " Environment bump queued for: #{request[:envs].join(', ')}." unless request[:envs].empty?
     message += " Chained into `#{request[:chain]}`." if request[:chain]

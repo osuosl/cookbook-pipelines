@@ -1,0 +1,152 @@
+{
+  "about": "Results of chef-repo scripts/env-pin-check.rb (EnvPinCheck#check errors, minus the \"(newest: ...)\" suffix) for these pins, so CI can check LandingCheck against it without chef-repo. spec/landing_check_spec.rb re-derives them wherever chef-repo is checked out alongside.",
+  "universe": {
+    "a": {
+      "1.0.0": {
+        "dependencies": {
+          "d": ">= 1.0",
+          "certificate": ">= 0.0.0"
+        }
+      }
+    },
+    "base": {
+      "9.16.3": {
+        "dependencies": {
+          "certificate": "~> 2.0.2"
+        }
+      }
+    },
+    "certificate": {
+      "2.0.4": {
+        "dependencies": {}
+      },
+      "3.0.0": {
+        "dependencies": {}
+      }
+    },
+    "d": {
+      "1.0.0": {
+        "dependencies": {
+          "osl-repos": ">= 3"
+        }
+      },
+      "2.0.0": {
+        "dependencies": {}
+      }
+    },
+    "p": {
+      "1.0.0": {
+        "dependencies": {
+          "d": "< 2.0"
+        }
+      }
+    },
+    "z": {
+      "1.0.0": {
+        "dependencies": {
+          "d": "< 2.0"
+        }
+      }
+    },
+    "f1": {
+      "1.0.0": {
+        "dependencies": {
+          "f2": ">= 0"
+        }
+      }
+    },
+    "f2": {
+      "1.0.0": {
+        "dependencies": {
+          "f3": "~> 1.0"
+        }
+      }
+    },
+    "f3": {
+      "1.0.0": {
+        "dependencies": {
+          "gone": ">= 1"
+        }
+      }
+    },
+    "osl-repos": {
+      "2.0.0": {
+        "dependencies": {}
+      },
+      "5.1.0": {
+        "dependencies": {}
+      }
+    }
+  },
+  "cases": [
+    {
+      "pins": {
+        "a": "= 1.0.0",
+        "base": "= 9.16.3",
+        "p": "= 1.0.0"
+      },
+      "errors": [
+        "base 9.16.3 depends on certificate (~> 2.0.2) but the environment resolves certificate 3.0.0",
+        "p 1.0.0 depends on d (< 2.0) but the environment resolves d 2.0.0"
+      ]
+    },
+    {
+      "pins": {
+        "p": "= 1.0.0",
+        "a": "= 1.0.0"
+      },
+      "errors": []
+    },
+    {
+      "pins": {
+        "z": "= 1.0.0",
+        "a": "= 1.0.0"
+      },
+      "errors": []
+    },
+    {
+      "pins": {
+        "base": "= 9.16.3",
+        "certificate": "= 3.0.0"
+      },
+      "errors": [
+        "base 9.16.3 depends on certificate (~> 2.0.2) but the environment resolves certificate 3.0.0"
+      ]
+    },
+    {
+      "pins": {
+        "missing": "= 1.0.0",
+        "certificate": "= 9.9.9",
+        "osl-repos": "~> 5.0"
+      },
+      "errors": [
+        "missing (= 1.0.0): cookbook not on chef server",
+        "certificate (= 9.9.9): no such version on chef server"
+      ]
+    },
+    {
+      "pins": {
+        "d": "= 1.0.0",
+        "osl-repos": "= 2.0.0"
+      },
+      "errors": [
+        "d 1.0.0 depends on osl-repos (>= 3) but the environment resolves osl-repos 2.0.0"
+      ]
+    },
+    {
+      "pins": {
+        "f1": "= 1.0.0"
+      },
+      "errors": [
+        "f3 1.0.0 depends on gone (>= 1): not satisfiable on chef server and not pinned"
+      ]
+    },
+    {
+      "pins": {
+        "base": "= 9.16.3",
+        "certificate": "2.0.4"
+      },
+      "errors": []
+    }
+  ]
+}

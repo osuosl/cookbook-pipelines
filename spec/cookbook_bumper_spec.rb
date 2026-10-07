@@ -70,7 +70,7 @@ RSpec.describe CookbookBumper do
     end
     git
   end
-  let(:community_deps) { double('community_deps', call: []) }
+  let(:community_deps) { double('community_deps', call: [], left_alone: []) }
   let(:shell_calls) { [] }
   let(:shell) { ->(*cmd) { shell_calls << cmd } }
 
@@ -90,8 +90,16 @@ RSpec.describe CookbookBumper do
 
     it 'merges the PR and bumps the minor version' do
       result = bumper(payload).run
-      expect(github).to have_received(:merge_pull_request).with('osuosl-cookbooks/osl-apache', 42)
+      expect(github).to have_received(:merge_pull_request).with('osuosl-cookbooks/osl-apache', 42, '', sha: 'abc123')
       expect(result['cookbooks']).to eq([{ 'name' => 'osl-apache', 'version' => '2.4.0' }])
+    end
+
+    # The bot's admin rights bypass branch protection, so a commit pushed
+    # after the checks ran must make GitHub refuse the merge instead.
+    it 'merges only the head commit it checked' do
+      bumper(payload).run
+      expect(github).to have_received(:merge_pull_request)
+        .with('osuosl-cookbooks/osl-apache', 42, '', sha: 'abc123')
     end
 
     it 'collects environments from env/* labels' do
@@ -390,7 +398,7 @@ RSpec.describe CookbookBumper do
 
       it 'merges without releasing anything' do
         expect(bumper(payload).run).to be_nil
-        expect(github).to have_received(:merge_pull_request).with('osuosl-cookbooks/osl-apache', 42)
+        expect(github).to have_received(:merge_pull_request).with('osuosl-cookbooks/osl-apache', 42, '', sha: 'abc123')
         expect(github).to have_received(:delete_branch)
         expect(repo).not_to have_received(:tag_add)
         expect(shell_calls).to be_empty
@@ -438,6 +446,45 @@ RSpec.describe CookbookBumper do
         end
         bumper(payload).run
         expect(order).to eq(%i(community merge))
+      end
+    end
+
+    # Base-owned dependencies are checked against the pins where this
+    # release lands, read before the merge from the same chain branch the
+    # environment bump will use.
+    it 'hands community deps the commit being released and its chef-repo pins' do
+      env.merge!('CHEF_REPO' => 'osuosl/chef-repo', 'DEFAULT_ENVIRONMENTS' => 'production,workstation')
+      environment_pins = instance_double(ChefRepoEnvironments::Pins)
+      allow(ChefRepoEnvironments::Pins).to receive(:new)
+        .with(github: github, chef_repo: 'osuosl/chef-repo', default_environments: %w(production workstation))
+        .and_return(environment_pins)
+      allow(environment_pins).to receive(:environments)
+        .with(%w(production), chain: nil).and_return('production' => { selected: true, addable: true, pins: {} })
+      landed = nil
+      head = nil
+      bump = nil
+      allow(community_deps).to receive(:call) do |*, head_sha:, next_version:, env_pins:|
+        head = head_sha
+        bump = next_version
+        landed = env_pins.call
+        []
+      end
+
+      bumper(payload).run
+      expect(landed).to eq('production' => { selected: true, addable: true, pins: {} })
+      expect(head).to eq('abc123')
+      expect(bump.call("name 'osl-apache'\nversion '2.3.4'\n")).to eq('2.4.0') # bump/minor
+      # What bump_metadata could not bump after the merge stops it before.
+      expect { bump.call("version '2.3.4' # WiP\n") }.to raise_error(CookbookBumper::Error, /no version line/)
+    end
+
+    context 'when an unconstrained community dependency was not re-pinned' do
+      before { allow(community_deps).to receive(:left_alone).and_return(['certificate']) }
+
+      it 'says so on the PR' do
+        bumper(payload).run
+        expect(github).to have_received(:add_comment)
+          .with('osuosl-cookbooks/osl-apache', 42, /Not re-pinned \(no version constraint .*\): certificate\./)
       end
     end
 

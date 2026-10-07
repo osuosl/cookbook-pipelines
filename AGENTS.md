@@ -22,7 +22,29 @@ cookbook via JCasC job-dsl.
   since triage users can label but must not release). A PR with no `env/*`
   label defaults to `env/default` and gets that label added for the record.
   Runs `bin/cookbook_bumper.rb`, then hands off to the environment-bumper
-  job.
+  job. Community cookbook pins (`lib/community_deps.rb`) move only when the
+  releasing cookbook's own metadata constrains them, and only to the newest
+  version every cookbook pinned alongside accepts (their constraints come
+  from the Chef server's /universe for the pinned versions, and from the PR
+  head's metadata.rb for the releasing cookbook; the landing
+  environments' pins are read from chef-repo via
+  `lib/chef_repo_environments.rb`, which the environment bumper shares for env
+  selection). An unconstrained `depends` never moves a pin, and a conflict or
+  a downgrade fails the release before merge. Every release, community pins
+  or not, is then checked independently (`lib/landing_check.rb`, a port of
+  chef-repo's `scripts/env-pin-check.rb` - keep the two in step; its results
+  are recorded in `spec/fixtures/env_pin_check_golden.json`, re-derived from
+  the script wherever chef-repo is checked out alongside): every chef-repo
+  environment is run through env-pin-check with this release's uploads (its
+  own next version included) but the live default-branch pins, with the new
+  pins (written over the chain branch's, for a chain), and with only the
+  community uploads should the merge fail. Any error that introduces -
+  even in an environment already failing for another reason - refuses the
+  release before merge, as does an `env/*` label naming no environment. The
+  uploader waits for the environment bump, so the next release in a chain
+  sees this one's pins. Known gap: two unmerged one-off bump PRs can each
+  pass and still conflict once both merge - chef-repo CI catches that on
+  whichever is re-tested second.
 - Chained bumps: a `Cookbook-Chain: <value>` line in the PR description
   (preferred) or a commit message accumulates several related releases into
   one chef-repo PR on `jenkins/chain-<key>`. The value is either a free-form
@@ -49,8 +71,9 @@ cookbook via JCasC job-dsl.
   canary list; also restricts default-branch merges to the bot account
   (PROTECT_BRANCHES) so PRs cannot be merged manually. `enforce_admins` is
   deliberately false, leaving repo admins a manual escape hatch — the bot holds
-  admin too, so `cookbook_bumper` checks `mergeable_state` itself and refuses
-  to merge anything branch protection would block for a normal user. Per-repo failures mark
+  admin too, so `cookbook_bumper` checks `mergeable_state` itself, refuses
+  to merge anything branch protection would block for a normal user, and
+  merges only the head SHA it checked. Per-repo failures mark
   the build UNSTABLE, not failed. Needs the out-of-band
   `cookbook_uploader_trigger` secret-text credential.
 - `lib/` + `bin/` — the Ruby implementation. `lib/` classes are dependency-

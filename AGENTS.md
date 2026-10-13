@@ -79,8 +79,8 @@ cookbook via JCasC job-dsl.
   deliberately false, leaving repo admins a manual escape hatch — the bot holds
   admin too, so `cookbook_bumper` checks `mergeable_state` itself, refuses
   to merge anything branch protection would block for a normal user, and
-  merges only the head SHA it checked. Per-repo failures mark
-  the build UNSTABLE, not failed. Needs the out-of-band
+  merges only the head SHA it checked. Each step of each repo fails on its
+  own; failures mark the build UNSTABLE, not failed. Needs the out-of-band
   `cookbook_uploader_trigger` secret-text credential.
 - `lib/` + `bin/` — the Ruby implementation. `lib/` classes are dependency-
   injected and unit-tested; `bin/` wrappers only wire ENV/stdin to them.

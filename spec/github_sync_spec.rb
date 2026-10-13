@@ -509,5 +509,26 @@ RSpec.describe GithubSync do
       expect(result[:failures].first).to match(/broken.*Forbidden/)
       expect(github).to have_received(:hooks).with('osuosl-cookbooks/test-cookbook')
     end
+
+    it 'records a failing step and continues with the rest of the repo' do
+      allow(github).to receive(:protect_branch).and_raise(Octokit::UnprocessableEntity.new(status: 422))
+
+      result = sync.run
+      expect(result[:failures].size).to eq(1)
+      expect(result[:failures].first).to match(/\Aosl-apache \(protection\): .*UnprocessableEntity/)
+      expect(github).to have_received(:edit_repository)
+    end
+
+    it 'skips only the webhook steps when the hook read fails' do
+      allow(github).to receive(:hooks).and_raise(Octokit::Forbidden.new(status: 403))
+
+      result = sync.run
+      expect(result[:failures].size).to eq(1)
+      expect(result[:failures].first).to match(/\Aosl-apache: .*Forbidden/)
+      expect(github).to have_received(:add_label).at_least(:once)
+      expect(github).to have_received(:protect_branch)
+      expect(github).to have_received(:edit_repository)
+      expect(github).not_to have_received(:create_hook)
+    end
   end
 end

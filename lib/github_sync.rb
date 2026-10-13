@@ -27,9 +27,9 @@ require_relative 'github_helpers'
 #                          the only account allowed to push/merge to default
 #                          branches when protection is managed
 #
-# Every repo is synced independently: a failure on one is recorded and the run
-# continues. The bin wrapper exits 2 when any repo failed so the Jenkins build
-# can go UNSTABLE rather than red.
+# Every repo, and every step within a repo, is synced independently: a failure
+# is recorded and the run continues. The bin wrapper exits 2 when anything
+# failed so the Jenkins build can go UNSTABLE rather than red.
 class GithubSync
   class Error < StandardError
   end
@@ -105,10 +105,9 @@ class GithubSync
     stats = Hash.new(0)
     failures = []
     repos.each do |repo_name|
-      sync_repo(repo_name, stats)
+      sync_repo(repo_name, stats, failures)
     rescue Octokit::Error => e
-      failures << "#{repo_name}: #{e.class}: #{e.message}"
-      @out.puts "FAILED #{repo_name}: #{e.class}: #{e.message}"
+      record_failure(failures, repo_name, e)
     end
     report(stats, failures)
     { stats: stats, failures: failures }
@@ -154,18 +153,40 @@ class GithubSync
     @repo_info[repo_name] ||= @github.repository("#{org}/#{repo_name}")
   end
 
-  def sync_repo(repo_name, stats)
+  # Each step is rescued on its own, so one GitHub refusal (a protection or
+  # settings write, say) doesn't leave the rest of the repo unsynced.
+  def sync_repo(repo_name, stats, failures)
     repo_path = "#{org}/#{repo_name}"
     migrated = migrated?(repo_path)
-    seed_labels(repo_path, stats)
+    run_steps(repo_name, failures, {
+                'labels' => -> { seed_labels(repo_path, stats) },
+                'teams' => -> { ensure_teams(repo_path, stats) },
+                # Protection first: while it still requires linear history,
+                # GitHub refuses to turn off squash and rebase merging (that
+                # would leave no way to merge).
+                'protection' => -> { ensure_branch_protection(repo_name, repo_path, migrated, stats) },
+                'settings' => -> { ensure_repo_settings(repo_name, repo_path, stats) },
+              })
+    # Last, so a failed hook read (recorded against the repo) skips only the
+    # two steps that need it.
     hooks = @github.hooks(repo_path)
-    ensure_hook(repo_path, hooks, stats)
-    remove_legacy_hooks(repo_path, repo_name, hooks, migrated, stats)
-    ensure_teams(repo_path, stats)
-    # Protection first: while it still requires linear history, GitHub refuses
-    # to turn off squash and rebase merging (that would leave no way to merge).
-    ensure_branch_protection(repo_name, repo_path, migrated, stats)
-    ensure_repo_settings(repo_name, repo_path, stats)
+    run_steps(repo_name, failures, {
+                'webhook' => -> { ensure_hook(repo_path, hooks, stats) },
+                'legacy hooks' => -> { remove_legacy_hooks(repo_path, repo_name, hooks, migrated, stats) },
+              })
+  end
+
+  def run_steps(repo_name, failures, steps)
+    steps.each do |step, work|
+      work.call
+    rescue Octokit::Error => e
+      record_failure(failures, "#{repo_name} (#{step})", e)
+    end
+  end
+
+  def record_failure(failures, what, error)
+    failures << "#{what}: #{error.class}: #{error.message}"
+    @out.puts "FAILED #{what}: #{error.class}: #{error.message}"
   end
 
   def required_check

@@ -315,9 +315,10 @@ class GithubSync
     end
   end
 
+  # After a rename GitHub still answers the old name, with the branch it
+  # became (branches/master returns main), so the name has to match too.
   def branch_exists?(repo_path, name)
-    @github.branch(repo_path, name)
-    true
+    @github.branch(repo_path, name).name == name
   rescue Octokit::NotFound
     false
   end

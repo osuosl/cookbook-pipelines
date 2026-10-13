@@ -26,6 +26,8 @@ RSpec.describe GithubSync do
   let(:repo_settings) { {} }
   let(:repo_teams) { [] }
   let(:existing_branches) { %w(master) }
+  let(:default_branch) { 'master' }
+  let(:renamed_branches) { {} }
   let(:github) do
     github = double(
       'github',
@@ -33,7 +35,7 @@ RSpec.describe GithubSync do
         double(name: 'osl-apache', archived?: false, default_branch: 'master'),
         double(name: 'old-thing', archived?: true, default_branch: 'master'),
       ],
-      repository: double(default_branch: 'master', to_h: repo_settings),
+      repository: double(default_branch: default_branch, to_h: repo_settings),
       add_label: true, create_hook: true, edit_hook: true, protect_branch: true,
       remove_hook: true, put: true, edit_repository: true,
       repository_teams: repo_teams
@@ -41,6 +43,8 @@ RSpec.describe GithubSync do
     allow(github).to receive(:labels).and_return(repo_labels)
     allow(github).to receive(:hooks).and_return(repo_hooks)
     allow(github).to receive(:branch) do |_repo, name|
+      # GitHub answers a renamed branch's old name with the branch it became.
+      name = renamed_branches.fetch(name, name)
       raise Octokit::NotFound.new(status: 404) unless existing_branches.include?(name)
 
       double(name: name)
@@ -396,6 +400,23 @@ RSpec.describe GithubSync do
         expect(github).to have_received(:protect_branch)
           .with('osuosl-cookbooks/osl-apache', 'main', anything)
         expect(result[:stats][:protection_updated]).to eq(2)
+      end
+    end
+
+    # After a rename, GET branches/master answers 200 with main; protecting
+    # the old name would 404.
+    context 'when master was renamed to main' do
+      let(:default_branch) { 'main' }
+      let(:existing_branches) { %w(main) }
+      let(:renamed_branches) { { 'master' => 'main' } }
+
+      it 'protects only main' do
+        result = sync.run
+        expect(github).to have_received(:protect_branch)
+          .with('osuosl-cookbooks/osl-apache', 'main', anything)
+        expect(github).not_to have_received(:protect_branch)
+          .with('osuosl-cookbooks/osl-apache', 'master', anything)
+        expect(result[:failures]).to be_empty
       end
     end
 

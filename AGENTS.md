@@ -66,7 +66,13 @@ cookbook via JCasC job-dsl.
   team permissions (chefs/staff write, ci/core admin), keeps the repo merge
   settings in sync, and requires up-to-date branches (`strict`) against the
   org folder's PR check — which also retires the legacy `chef-ci-linter-*`
-  required context automatically.
+  required context automatically. It forces "require linear history" off,
+  since PRs land as merge commits, and runs protection before the merge
+  settings because GitHub won't disable squash and rebase while linear history
+  is on. Protection is a full-replace PUT, so the existing checks, reviews,
+  push-restriction teams and `CARRIED_RULES` (lock, force-push, deletions, …)
+  are carried forward; what it still drops is listed above
+  `ensure_branch_protection`.
   Deliberately not part of the chef converge. Supports `DRY_RUN` and a `REPOS`
   canary list; also restricts default-branch merges to the bot account
   (PROTECT_BRANCHES) so PRs cannot be merged manually. `enforce_admins` is

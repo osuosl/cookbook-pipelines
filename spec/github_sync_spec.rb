@@ -64,6 +64,20 @@ RSpec.describe GithubSync do
   let(:sleeps) { [] }
   let(:out) { StringIO.new }
 
+  # Shaped like GitHub's protection response: already restricted to the bot,
+  # with every other rule off unless overridden.
+  def protection_double(**attrs)
+    defaults = {
+      enforce_admins: double(enabled: false),
+      required_linear_history: double(enabled: false),
+      restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
+      required_status_checks: nil,
+      required_pull_request_reviews: nil,
+    }
+    described_class::CARRIED_RULES.each { |rule| defaults[rule] = double(enabled: false) }
+    double('protection', **defaults, **attrs)
+  end
+
   def sync(overrides = {})
     described_class.new(env: env.merge(overrides), github: github,
                         out: out, sleeper: ->(s) { sleeps << s })
@@ -283,8 +297,7 @@ RSpec.describe GithubSync do
 
     context 'when protection exists with other settings' do
       let(:protection) do
-        double(
-          enforce_admins: double(enabled: false),
+        protection_double(
           restrictions: double(users: [], teams: [double(slug: 'staff')]),
           required_status_checks: double(strict: true, contexts: ['ci/lint']),
           required_pull_request_reviews: double(
@@ -328,11 +341,8 @@ RSpec.describe GithubSync do
 
       context 'that still requires the legacy linter check' do
         let(:protection) do
-          double(
-            enforce_admins: double(enabled: false),
-            restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
-            required_status_checks: double(strict: false, contexts: ['chef-ci-linter-osl-apache']),
-            required_pull_request_reviews: nil
+          protection_double(
+            required_status_checks: double(strict: false, contexts: ['chef-ci-linter-osl-apache'])
           )
         end
 
@@ -352,11 +362,8 @@ RSpec.describe GithubSync do
 
     context 'on an unmigrated repo with its own required check' do
       let(:protection) do
-        double(
-          enforce_admins: double(enabled: false),
-          restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
-          required_status_checks: double(strict: false, contexts: ['chef-ci-linter-osl-apache']),
-          required_pull_request_reviews: nil
+        protection_double(
+          required_status_checks: double(strict: false, contexts: ['chef-ci-linter-osl-apache'])
         )
       end
 
@@ -372,14 +379,7 @@ RSpec.describe GithubSync do
     end
 
     context 'when protection is already correct' do
-      let(:protection) do
-        double(
-          enforce_admins: double(enabled: false),
-          restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
-          required_status_checks: nil,
-          required_pull_request_reviews: nil
-        )
-      end
+      let(:protection) { protection_double }
 
       it 'issues no write' do
         result = sync.run
@@ -420,12 +420,43 @@ RSpec.describe GithubSync do
       end
     end
 
+    # Linear history forbids the merge commits PRs land with, and while it is
+    # on GitHub refuses to turn squash and rebase merging off.
+    context 'when linear history is required' do
+      let(:protection) { protection_double(required_linear_history: double(enabled: true)) }
+
+      it 'turns it off before changing the merge settings' do
+        sync.run
+        expect(github).to have_received(:protect_branch).with(
+          'osuosl-cookbooks/osl-apache', 'master',
+          hash_including(required_linear_history: false)
+        ).ordered
+        expect(github).to have_received(:edit_repository).ordered
+      end
+    end
+
+    # The PUT resets every rule it omits; a locked branch must stay locked.
+    context 'when protection has rules this job does not manage' do
+      let(:protection) do
+        protection_double(
+          restrictions: double(users: [], teams: []),
+          lock_branch: double(enabled: true),
+          required_conversation_resolution: double(enabled: true)
+        )
+      end
+
+      it 'carries them forward in the replace PUT' do
+        sync.run
+        expect(github).to have_received(:protect_branch).with(
+          'osuosl-cookbooks/osl-apache', 'master',
+          hash_including(lock_branch: true, required_conversation_resolution: true, allow_force_pushes: false)
+        )
+      end
+    end
+
     context 'when stale-review dismissal is off' do
       let(:protection) do
-        double(
-          enforce_admins: double(enabled: false),
-          restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
-          required_status_checks: nil,
+        protection_double(
           required_pull_request_reviews: double(
             dismiss_stale_reviews: false,
             require_code_owner_reviews: false,

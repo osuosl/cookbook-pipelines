@@ -79,6 +79,17 @@ class GithubSync
   # the legacy GHPRB context so nobody has to swap it by hand.
   LEGACY_CHECK_RE = /\Achef-ci-linter-/
 
+  # Protection rules this job doesn't manage. The protection PUT resets any
+  # rule it omits, so each is carried forward from the existing protection.
+  CARRIED_RULES = %i(
+    allow_deletions
+    allow_force_pushes
+    allow_fork_syncing
+    block_creations
+    lock_branch
+    required_conversation_resolution
+  ).freeze
+
   def self.from_env
     new
   end
@@ -151,8 +162,10 @@ class GithubSync
     ensure_hook(repo_path, hooks, stats)
     remove_legacy_hooks(repo_path, repo_name, hooks, migrated, stats)
     ensure_teams(repo_path, stats)
-    ensure_repo_settings(repo_name, repo_path, stats)
+    # Protection first: while it still requires linear history, GitHub refuses
+    # to turn off squash and rebase merging (that would leave no way to merge).
     ensure_branch_protection(repo_name, repo_path, migrated, stats)
+    ensure_repo_settings(repo_name, repo_path, stats)
   end
 
   def required_check
@@ -279,10 +292,13 @@ class GithubSync
   # to merge a PR that branch protection would block for a normal user.
   #
   # CAUTION: the protection endpoint is a full-replace PUT. Existing settings
-  # (required checks, review rules, team restrictions) are read first and
-  # carried forward unchanged; only the push restriction and enforce_admins
-  # are overlaid. Never turn this into a blind PUT - authoritative-on-apply
-  # APIs have burned us before.
+  # (required contexts, review count and code-owner rule, push-restriction
+  # teams, CARRIED_RULES) are read first and carried forward unchanged; only
+  # the push restriction, enforce_admins and linear history are overlaid.
+  # Still dropped, and unused across the org: push-restriction apps, review
+  # dismissal and bypass lists, require_last_push_approval, and checks pinned
+  # to an app. Carry any of those forward before relying on it. Never turn
+  # this into a blind PUT - authoritative-on-apply APIs have burned us before.
   def ensure_branch_protection(repo_name, repo_path, migrated, stats)
     return unless @env.fetch('PROTECT_BRANCHES', 'true') == 'true'
 
@@ -328,6 +344,7 @@ class GithubSync
 
     users = (existing.restrictions&.users || []).map(&:login)
     return false unless users == [bot] && existing.enforce_admins&.enabled == false
+    return false if existing.required_linear_history&.enabled
 
     reviews = existing.required_pull_request_reviews
     return false if reviews && !reviews.dismiss_stale_reviews
@@ -363,10 +380,16 @@ class GithubSync
   # already had. All four top-level keys are mandatory on this endpoint.
   def protection_request(existing, bot, migrated:)
     reviews = existing&.required_pull_request_reviews
+    carried = CARRIED_RULES.to_h { |rule| [rule, existing&.public_send(rule)&.enabled] }.compact
     {
       # False on purpose: admins keep a manual merge escape hatch. See
       # ensure_branch_protection.
       enforce_admins: false,
+      # Off on purpose: PRs land as merge commits, which linear history
+      # forbids for everyone but admins like the bot, and while it is on
+      # GitHub won't turn off squash and rebase merging. Branch linearity is
+      # oslCookbookCI's job instead.
+      required_linear_history: false,
       restrictions: {
         users: [bot],
         teams: (existing&.restrictions&.teams || []).map(&:slug),
@@ -379,7 +402,7 @@ class GithubSync
         require_code_owner_reviews: reviews.require_code_owner_reviews,
         required_approving_review_count: reviews.required_approving_review_count,
       }.compact,
-    }
+    }.merge(carried)
   end
 
   # Perform (or, in dry-run, describe) a mutating GitHub call. GitHub asks for

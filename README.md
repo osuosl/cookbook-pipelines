@@ -25,7 +25,8 @@ Jenkins pipeline tooling for OSUOSL's Chef cookbook automation:
   have migrated (Jenkinsfile present), grants the standing team permissions,
   enables auto-delete of merged branches, and restricts default-branch merges
   to the Jenkins bot so PRs can only land through the bump workflow (repo
-  admins stay exempt as an escape hatch). Supports `DRY_RUN` and a `REPOS`
+  admins stay exempt as an escape hatch), with one approving review required
+  wherever a branch has no review rule yet. Supports `DRY_RUN` and a `REPOS`
   canary list.
 
 The pipelines run against cinc-workstation's embedded ruby on the Jenkins

@@ -79,6 +79,14 @@ class GithubSync
   # the legacy GHPRB context so nobody has to swap it by hand.
   LEGACY_CHECK_RE = /\Achef-ci-linter-/
 
+  # The review rule a branch gets when it has none, matching the rest of the
+  # org: one approval, dismissed by any later push. An existing rule is kept.
+  DEFAULT_REVIEWS = {
+    dismiss_stale_reviews: true,
+    require_code_owner_reviews: false,
+    required_approving_review_count: 1,
+  }.freeze
+
   # Protection rules this job doesn't manage. The protection PUT resets any
   # rule it omits, so each is carried forward from the existing protection.
   CARRIED_RULES = %i(
@@ -315,7 +323,8 @@ class GithubSync
   # CAUTION: the protection endpoint is a full-replace PUT. Existing settings
   # (required contexts, review count and code-owner rule, push-restriction
   # teams, CARRIED_RULES) are read first and carried forward unchanged; only
-  # the push restriction, enforce_admins and linear history are overlaid.
+  # the push restriction, enforce_admins and linear history are overlaid, and
+  # a branch with no review rule gets DEFAULT_REVIEWS.
   # Still dropped, and unused across the org: push-restriction apps, review
   # dismissal and bypass lists, require_last_push_approval, and checks pinned
   # to an app. Carry any of those forward before relying on it. Never turn
@@ -344,12 +353,12 @@ class GithubSync
     end
   end
 
-  # The default branch plus whichever of master/main also exists.
+  # The default branch plus whichever of master/main also exists. A new repo
+  # names its default branch before the first push creates it, and protecting
+  # it then would 404 on every run until that push.
   def protection_branches(repo_name, repo_path)
     default = repo_info(repo_name).default_branch
-    ([default] | MIGRATION_BRANCHES).select do |name|
-      name == default || branch_exists?(repo_path, name)
-    end
+    ([default] | MIGRATION_BRANCHES).select { |name| branch_exists?(repo_path, name) }
   end
 
   # After a rename GitHub still answers the old name, with the branch it
@@ -368,7 +377,7 @@ class GithubSync
     return false if existing.required_linear_history&.enabled
 
     reviews = existing.required_pull_request_reviews
-    return false if reviews && !reviews.dismiss_stale_reviews
+    return false unless reviews&.dismiss_stale_reviews
 
     checks_current?(existing.required_status_checks, desired[:required_status_checks])
   end
@@ -416,14 +425,21 @@ class GithubSync
         teams: (existing&.restrictions&.teams || []).map(&:slug),
       },
       required_status_checks: required_status_checks(existing, migrated: migrated),
-      required_pull_request_reviews: reviews && {
-        # Forced on where reviews are required at all: a new push dismisses
-        # old approvals, so what merges is what was actually reviewed.
-        dismiss_stale_reviews: true,
-        require_code_owner_reviews: reviews.require_code_owner_reviews,
-        required_approving_review_count: reviews.required_approving_review_count,
-      }.compact,
+      required_pull_request_reviews: reviews_request(reviews),
     }.merge(carried)
+  end
+
+  # A branch with no review rule gets DEFAULT_REVIEWS; otherwise its rule is
+  # kept, with stale-review dismissal forced on so that a new push dismisses
+  # old approvals and what merges is what was actually reviewed.
+  def reviews_request(reviews)
+    return DEFAULT_REVIEWS.dup if reviews.nil?
+
+    {
+      dismiss_stale_reviews: true,
+      require_code_owner_reviews: reviews.require_code_owner_reviews,
+      required_approving_review_count: reviews.required_approving_review_count,
+    }.compact
   end
 
   # Perform (or, in dry-run, describe) a mutating GitHub call. GitHub asks for

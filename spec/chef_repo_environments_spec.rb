@@ -91,7 +91,8 @@ RSpec.describe ChefRepoEnvironments do
 
     context 'with a chain' do
       it 'reads pins from the chain branch and live pins from the default one' do
-        allow(github).to receive(:branch).with('osuosl/chef-repo', 'jenkins/chain-rt').and_return(double)
+        allow(github).to receive(:branch).with('osuosl/chef-repo', 'jenkins/chain-rt')
+                                         .and_return(double(name: 'jenkins/chain-rt'))
         stub_environments(nil)
         stub_environments('jenkins/chain-rt', environments.merge('phpbb' => { 'certificate' => '= 2.0.4' }))
 
@@ -101,7 +102,8 @@ RSpec.describe ChefRepoEnvironments do
       end
 
       it 'has no live pins for an environment the chain adds' do
-        allow(github).to receive(:branch).with('osuosl/chef-repo', 'jenkins/chain-rt').and_return(double)
+        allow(github).to receive(:branch).with('osuosl/chef-repo', 'jenkins/chain-rt')
+                                         .and_return(double(name: 'jenkins/chain-rt'))
         stub_environments(nil)
         stub_environments('jenkins/chain-rt', environments.merge('staging' => { 'osl-rt' => '= 4.1.0' }))
 
@@ -110,6 +112,14 @@ RSpec.describe ChefRepoEnvironments do
 
       it 'falls back to the default branch before the chain branch exists' do
         allow(github).to receive(:branch).and_raise(Octokit::NotFound)
+        stub_environments(nil)
+
+        expect(pins.environments(%w(phpbb), chain: 'rt')['phpbb']).to eq(entry('phpbb', true))
+      end
+
+      # GitHub answers a renamed branch's old name with the branch it became.
+      it 'falls back to the default branch when the chain branch name was renamed away' do
+        allow(github).to receive(:branch).and_return(double(name: 'jenkins/chain-other'))
         stub_environments(nil)
 
         expect(pins.environments(%w(phpbb), chain: 'rt')['phpbb']).to eq(entry('phpbb', true))

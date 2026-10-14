@@ -7,8 +7,8 @@ require_relative 'github_helpers'
 # points pull_request events at the cookbook-uploader job's
 # generic-webhook-trigger endpoint.
 #
-# This runs as the scheduled `github-sync` Jenkins job (every 30 minutes,
-# matching the chef-client cadence, plus on demand), NOT from chef: an
+# This runs as the scheduled `github-sync` Jenkins job (every 4 hours per
+# osl-jenkins' job definition, plus on demand), NOT from chef: an
 # org-wide GitHub reconciliation inside every chef-client run made converge
 # time proportional to org size and converge success dependent on GitHub
 # availability.
@@ -27,9 +27,9 @@ require_relative 'github_helpers'
 #                          the only account allowed to push/merge to default
 #                          branches when protection is managed
 #
-# Every repo is synced independently: a failure on one is recorded and the run
-# continues. The bin wrapper exits 2 when any repo failed so the Jenkins build
-# can go UNSTABLE rather than red.
+# Every repo, and every step within a repo, is synced independently: a failure
+# is recorded and the run continues. The bin wrapper exits 2 when anything
+# failed so the Jenkins build can go UNSTABLE rather than red.
 class GithubSync
   class Error < StandardError
   end
@@ -79,6 +79,17 @@ class GithubSync
   # the legacy GHPRB context so nobody has to swap it by hand.
   LEGACY_CHECK_RE = /\Achef-ci-linter-/
 
+  # Protection rules this job doesn't manage. The protection PUT resets any
+  # rule it omits, so each is carried forward from the existing protection.
+  CARRIED_RULES = %i(
+    allow_deletions
+    allow_force_pushes
+    allow_fork_syncing
+    block_creations
+    lock_branch
+    required_conversation_resolution
+  ).freeze
+
   def self.from_env
     new
   end
@@ -94,10 +105,9 @@ class GithubSync
     stats = Hash.new(0)
     failures = []
     repos.each do |repo_name|
-      sync_repo(repo_name, stats)
+      sync_repo(repo_name, stats, failures)
     rescue Octokit::Error => e
-      failures << "#{repo_name}: #{e.class}: #{e.message}"
-      @out.puts "FAILED #{repo_name}: #{e.class}: #{e.message}"
+      record_failure(failures, repo_name, e)
     end
     report(stats, failures)
     { stats: stats, failures: failures }
@@ -143,16 +153,40 @@ class GithubSync
     @repo_info[repo_name] ||= @github.repository("#{org}/#{repo_name}")
   end
 
-  def sync_repo(repo_name, stats)
+  # Each step is rescued on its own, so one GitHub refusal (a protection or
+  # settings write, say) doesn't leave the rest of the repo unsynced.
+  def sync_repo(repo_name, stats, failures)
     repo_path = "#{org}/#{repo_name}"
     migrated = migrated?(repo_path)
-    seed_labels(repo_path, stats)
+    run_steps(repo_name, failures, {
+                'labels' => -> { seed_labels(repo_path, stats) },
+                'teams' => -> { ensure_teams(repo_path, stats) },
+                # Protection first: while it still requires linear history,
+                # GitHub refuses to turn off squash and rebase merging (that
+                # would leave no way to merge).
+                'protection' => -> { ensure_branch_protection(repo_name, repo_path, migrated, stats) },
+                'settings' => -> { ensure_repo_settings(repo_name, repo_path, stats) },
+              })
+    # Last, so a failed hook read (recorded against the repo) skips only the
+    # two steps that need it.
     hooks = @github.hooks(repo_path)
-    ensure_hook(repo_path, hooks, stats)
-    remove_legacy_hooks(repo_path, repo_name, hooks, migrated, stats)
-    ensure_teams(repo_path, stats)
-    ensure_repo_settings(repo_name, repo_path, stats)
-    ensure_branch_protection(repo_name, repo_path, migrated, stats)
+    run_steps(repo_name, failures, {
+                'webhook' => -> { ensure_hook(repo_path, hooks, stats) },
+                'legacy hooks' => -> { remove_legacy_hooks(repo_path, repo_name, hooks, migrated, stats) },
+              })
+  end
+
+  def run_steps(repo_name, failures, steps)
+    steps.each do |step, work|
+      work.call
+    rescue Octokit::Error => e
+      record_failure(failures, "#{repo_name} (#{step})", e)
+    end
+  end
+
+  def record_failure(failures, what, error)
+    failures << "#{what}: #{error.class}: #{error.message}"
+    @out.puts "FAILED #{what}: #{error.class}: #{error.message}"
   end
 
   def required_check
@@ -279,10 +313,13 @@ class GithubSync
   # to merge a PR that branch protection would block for a normal user.
   #
   # CAUTION: the protection endpoint is a full-replace PUT. Existing settings
-  # (required checks, review rules, team restrictions) are read first and
-  # carried forward unchanged; only the push restriction and enforce_admins
-  # are overlaid. Never turn this into a blind PUT - authoritative-on-apply
-  # APIs have burned us before.
+  # (required contexts, review count and code-owner rule, push-restriction
+  # teams, CARRIED_RULES) are read first and carried forward unchanged; only
+  # the push restriction, enforce_admins and linear history are overlaid.
+  # Still dropped, and unused across the org: push-restriction apps, review
+  # dismissal and bypass lists, require_last_push_approval, and checks pinned
+  # to an app. Carry any of those forward before relying on it. Never turn
+  # this into a blind PUT - authoritative-on-apply APIs have burned us before.
   def ensure_branch_protection(repo_name, repo_path, migrated, stats)
     return unless @env.fetch('PROTECT_BRANCHES', 'true') == 'true'
 
@@ -315,9 +352,10 @@ class GithubSync
     end
   end
 
+  # After a rename GitHub still answers the old name, with the branch it
+  # became (branches/master returns main), so the name has to match too.
   def branch_exists?(repo_path, name)
-    @github.branch(repo_path, name)
-    true
+    @github.branch(repo_path, name).name == name
   rescue Octokit::NotFound
     false
   end
@@ -327,6 +365,7 @@ class GithubSync
 
     users = (existing.restrictions&.users || []).map(&:login)
     return false unless users == [bot] && existing.enforce_admins&.enabled == false
+    return false if existing.required_linear_history&.enabled
 
     reviews = existing.required_pull_request_reviews
     return false if reviews && !reviews.dismiss_stale_reviews
@@ -362,10 +401,16 @@ class GithubSync
   # already had. All four top-level keys are mandatory on this endpoint.
   def protection_request(existing, bot, migrated:)
     reviews = existing&.required_pull_request_reviews
+    carried = CARRIED_RULES.to_h { |rule| [rule, existing&.public_send(rule)&.enabled] }.compact
     {
       # False on purpose: admins keep a manual merge escape hatch. See
       # ensure_branch_protection.
       enforce_admins: false,
+      # Off on purpose: PRs land as merge commits, which linear history
+      # forbids for everyone but admins like the bot, and while it is on
+      # GitHub won't turn off squash and rebase merging. Branch linearity is
+      # oslCookbookCI's job instead.
+      required_linear_history: false,
       restrictions: {
         users: [bot],
         teams: (existing&.restrictions&.teams || []).map(&:slug),
@@ -378,7 +423,7 @@ class GithubSync
         require_code_owner_reviews: reviews.require_code_owner_reviews,
         required_approving_review_count: reviews.required_approving_review_count,
       }.compact,
-    }
+    }.merge(carried)
   end
 
   # Perform (or, in dry-run, describe) a mutating GitHub call. GitHub asks for

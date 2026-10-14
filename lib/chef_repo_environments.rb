@@ -77,8 +77,8 @@ module ChefRepoEnvironments
       return nil unless chain
 
       branch = ChefRepoEnvironments.chain_branch(chain)
-      @github.branch(@chef_repo, branch)
-      branch
+      # A renamed branch still answers to its old name, as the branch it became.
+      branch if @github.branch(@chef_repo, branch).name == branch
     rescue Octokit::NotFound
       nil
     end

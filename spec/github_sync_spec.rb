@@ -72,7 +72,9 @@ RSpec.describe GithubSync do
       required_linear_history: double(enabled: false),
       restrictions: double(users: [double(login: 'osuosl-bot')], teams: []),
       required_status_checks: nil,
-      required_pull_request_reviews: nil,
+      required_pull_request_reviews: double(
+        dismiss_stale_reviews: true, require_code_owner_reviews: false, required_approving_review_count: 1
+      ),
     }
     described_class::CARRIED_RULES.each { |rule| defaults[rule] = double(enabled: false) }
     double('protection', **defaults, **attrs)
@@ -302,8 +304,8 @@ RSpec.describe GithubSync do
           required_status_checks: double(strict: true, contexts: ['ci/lint']),
           required_pull_request_reviews: double(
             dismiss_stale_reviews: true,
-            require_code_owner_reviews: false,
-            required_approving_review_count: 1
+            require_code_owner_reviews: true,
+            required_approving_review_count: 2
           )
         )
       end
@@ -315,8 +317,40 @@ RSpec.describe GithubSync do
           hash_including(
             restrictions: { users: %w(osuosl-bot), teams: %w(staff) },
             required_status_checks: { strict: true, contexts: ['ci/lint'] },
-            required_pull_request_reviews: hash_including(required_approving_review_count: 1)
+            required_pull_request_reviews: {
+              dismiss_stale_reviews: true, require_code_owner_reviews: true, required_approving_review_count: 2,
+            }
           )
+        )
+      end
+    end
+
+    # Every other repo in the org requires one approval; a branch protected
+    # without a review rule (new, or protected by this job from scratch)
+    # would otherwise merge on CI alone.
+    context 'when the branch has no review rule' do
+      let(:protection) { protection_double(required_pull_request_reviews: nil) }
+
+      it 'adds one required approval with stale-review dismissal' do
+        result = sync.run
+        expect(github).to have_received(:protect_branch).with(
+          'osuosl-cookbooks/osl-apache', 'master',
+          hash_including(
+            required_pull_request_reviews: {
+              dismiss_stale_reviews: true, require_code_owner_reviews: false, required_approving_review_count: 1,
+            }
+          )
+        )
+        expect(result[:stats][:protection_updated]).to eq(1)
+      end
+    end
+
+    context 'when the branch is not protected yet' do
+      it 'requires one approval from the start' do
+        sync.run
+        expect(github).to have_received(:protect_branch).with(
+          'osuosl-cookbooks/osl-apache', 'master',
+          hash_including(required_pull_request_reviews: hash_including(required_approving_review_count: 1))
         )
       end
     end

@@ -72,7 +72,9 @@ cookbook via JCasC job-dsl.
   is on. Protection is a full-replace PUT, so the existing checks, reviews,
   push-restriction teams and `CARRIED_RULES` (lock, force-push, deletions, …)
   are carried forward; what it still drops is listed above
-  `ensure_branch_protection`.
+  `ensure_branch_protection`. A branch with no review rule gets one
+  required approval with stale reviews dismissed (`DEFAULT_REVIEWS`), as the
+  rest of the org has; an existing rule is kept.
   Deliberately not part of the chef converge. Supports `DRY_RUN` and a `REPOS`
   canary list; also restricts default-branch merges to the bot account
   (PROTECT_BRANCHES) so PRs cannot be merged manually. `enforce_admins` is

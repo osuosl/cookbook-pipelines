@@ -437,6 +437,17 @@ RSpec.describe GithubSync do
       end
     end
 
+    context 'when the repo is still empty' do
+      let(:default_branch) { 'main' }
+      let(:existing_branches) { [] }
+
+      it 'protects nothing until the first push creates the branch' do
+        result = sync.run
+        expect(github).not_to have_received(:protect_branch)
+        expect(result[:failures]).to be_empty
+      end
+    end
+
     # After a rename, GET branches/master answers 200 with main; protecting
     # the old name would 404.
     context 'when master was renamed to main' do

@@ -353,12 +353,12 @@ class GithubSync
     end
   end
 
-  # The default branch plus whichever of master/main also exists.
+  # The default branch plus whichever of master/main also exists. A new repo
+  # names its default branch before the first push creates it, and protecting
+  # it then would 404 on every run until that push.
   def protection_branches(repo_name, repo_path)
     default = repo_info(repo_name).default_branch
-    ([default] | MIGRATION_BRANCHES).select do |name|
-      name == default || branch_exists?(repo_path, name)
-    end
+    ([default] | MIGRATION_BRANCHES).select { |name| branch_exists?(repo_path, name) }
   end
 
   # After a rename GitHub still answers the old name, with the branch it

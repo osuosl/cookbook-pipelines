@@ -19,7 +19,7 @@ Jenkins pipeline tooling for OSUOSL's Chef cookbook automation:
   `environments/*.json` and opens (or, for chained bumps, updates) a PR.
   Explicitly named environments also gain missing pins; `all` only updates
   existing ones.
-- **github-sync** — scheduled reconciliation (every 30 minutes + on demand)
+- **github-sync** — scheduled reconciliation (every 4 hours + on demand)
   of GitHub-side state across the org: seeds the `bump/*`/`env/*` labels,
   manages the uploader webhooks, removes the legacy webhooks from repos that
   have migrated (Jenkinsfile present), grants the standing team permissions,

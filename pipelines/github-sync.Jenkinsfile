@@ -1,6 +1,6 @@
 // Reconciles GitHub-side state for the bump workflow (bump/* and env/*
-// labels, uploader webhooks) across the whole org. Scheduled every 30
-// minutes (offset from the chef-client interval) and runnable on demand;
+// labels, uploader webhooks) across the whole org. Scheduled every 4 hours
+// (the cron lives in osl-jenkins' job definition) and runnable on demand;
 // deliberately NOT part of the chef converge, so converge time stays
 // independent of org size.
 //

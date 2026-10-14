@@ -7,8 +7,8 @@ require_relative 'github_helpers'
 # points pull_request events at the cookbook-uploader job's
 # generic-webhook-trigger endpoint.
 #
-# This runs as the scheduled `github-sync` Jenkins job (every 30 minutes,
-# matching the chef-client cadence, plus on demand), NOT from chef: an
+# This runs as the scheduled `github-sync` Jenkins job (every 4 hours per
+# osl-jenkins' job definition, plus on demand), NOT from chef: an
 # org-wide GitHub reconciliation inside every chef-client run made converge
 # time proportional to org size and converge success dependent on GitHub
 # availability.

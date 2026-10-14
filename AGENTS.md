@@ -59,7 +59,7 @@ cookbook via JCasC job-dsl.
   versions in chef-repo `environments/*.json` and opens/updates a PR. Supports
   multi-cookbook pins and chains via its `chain` parameter.
 - `pipelines/github-sync.Jenkinsfile` + `lib/github_sync.rb` — scheduled
-  (every 30 min + on-demand) reconciliation of GitHub-side state: seeds `bump/*`
+  (4-hourly + on-demand) reconciliation of GitHub-side state: seeds `bump/*`
   (incl. `bump/skip`) and `env/*` labels and the uploader webhook in every
   non-archived org repo, removes the legacy webhooks (per-repo uploader hook,
   GHPRB `/ghprbhook/`) from repos that have a Jenkinsfile, grants the standing

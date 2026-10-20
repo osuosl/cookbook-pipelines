@@ -22,7 +22,11 @@ cookbook via JCasC job-dsl.
   since triage users can label but must not release). A PR with no `env/*`
   label defaults to `env/default` and gets that label added for the record.
   Runs `bin/cookbook_bumper.rb`, then hands off to the environment-bumper
-  job. Community cookbook pins (`lib/community_deps.rb`) move only when the
+  job. The bump commit and its tag go up in one `git push --atomic` (the
+  git gem's `tags: true` is a second push, which once landed the commit
+  without the tag); a release that fails after the merge links its PR
+  comment to the README's recovery steps.
+  Community cookbook pins (`lib/community_deps.rb`) move only when the
   releasing cookbook's own metadata constrains them, and only to the newest
   version every cookbook pinned alongside accepts (their constraints come
   from the Chef server's /universe for the pinned versions, and from the PR

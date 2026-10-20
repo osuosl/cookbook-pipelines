@@ -48,7 +48,7 @@ RSpec.describe CookbookBumper do
     )
   end
   let(:repo) do
-    double('repo', checkout: true, add: true, commit: true, tag_add: true, push: true)
+    double('repo', checkout: true, add: true, commit: true, tag_create: true)
   end
   let(:git) do
     git = double('git')
@@ -134,11 +134,14 @@ RSpec.describe CookbookBumper do
       expect(result['pr_link']).to eq('https://github.com/osuosl-cookbooks/osl-apache/pull/42')
     end
 
-    it 'commits, tags, and pushes to the PR base branch' do
+    # A single atomic push, so GitHub can never take the commit but not the tag.
+    it 'commits, tags, and pushes both atomically to the PR base branch' do
       bumper(payload).run
       expect(repo).to have_received(:checkout).with('master')
-      expect(repo).to have_received(:tag_add).with('v2.4.0')
-      expect(repo).to have_received(:push).with('origin', 'master', tags: true)
+      expect(repo).to have_received(:tag_create).with('v2.4.0')
+      expect(shell_calls).to include(
+        ['git', '-C', anything, 'push', '--atomic', 'origin', 'master', 'refs/tags/v2.4.0']
+      )
     end
 
     it 'deletes the source branch' do
@@ -148,7 +151,7 @@ RSpec.describe CookbookBumper do
 
     it 'does not run knife when DO_NOT_UPLOAD is set' do
       bumper(payload).run
-      expect(shell_calls).to be_empty
+      expect(shell_calls.map(&:first)).not_to include('knife')
     end
 
     # Org cookbooks go to the Chef server AND the local supermarket -
@@ -178,7 +181,9 @@ RSpec.describe CookbookBumper do
       it 'pushes to main without any master assumption' do
         bumper(payload).run
         expect(repo).to have_received(:checkout).with('main')
-        expect(repo).to have_received(:push).with('origin', 'main', tags: true)
+        expect(shell_calls).to include(
+          ['git', '-C', anything, 'push', '--atomic', 'origin', 'main', 'refs/tags/v2.4.0']
+        )
       end
     end
 
@@ -257,8 +262,8 @@ RSpec.describe CookbookBumper do
 
       it 'uploads and shares the cookbook' do
         bumper(payload).run
-        expect(shell_calls.map(&:first)).to eq(%w(knife knife))
-        expect(shell_calls.first).to include('cookbook', 'upload', 'osl-apache', '--freeze')
+        expect(shell_calls.map(&:first)).to eq(%w(git knife knife))
+        expect(shell_calls[1]).to include('cookbook', 'upload', 'osl-apache', '--freeze')
       end
     end
 
@@ -400,7 +405,7 @@ RSpec.describe CookbookBumper do
         expect(bumper(payload).run).to be_nil
         expect(github).to have_received(:merge_pull_request).with('osuosl-cookbooks/osl-apache', 42, '', sha: 'abc123')
         expect(github).to have_received(:delete_branch)
-        expect(repo).not_to have_received(:tag_add)
+        expect(repo).not_to have_received(:tag_create)
         expect(shell_calls).to be_empty
         expect(File).not_to exist(env['RESULT_FILE'])
       end
@@ -499,7 +504,7 @@ RSpec.describe CookbookBumper do
       it 'aborts before merging or releasing anything' do
         expect { bumper(payload).run }.to raise_error(CommunityDeps::Error, /postfix/)
         expect(github).not_to have_received(:merge_pull_request)
-        expect(repo).not_to have_received(:tag_add)
+        expect(repo).not_to have_received(:tag_create)
         expect(File).not_to exist(env['RESULT_FILE'])
       end
 
@@ -525,16 +530,16 @@ RSpec.describe CookbookBumper do
     # different guidance, since re-labelling cannot retry a merged PR.
     context 'when the release fails after the merge' do
       let(:env) { super().merge('BUILD_URL' => 'https://jenkins.example.org/job/cookbook-uploader/7/') }
-
-      before do
-        allow(repo).to receive(:push).and_raise(StandardError, 'remote hung up')
+      let(:guidance) { /Release failed after the PR was merged.*manual recovery.*remote hung up.*jenkins.example.org/m }
+      let(:shell) do
+        ->(*cmd) { cmd[3] == 'push' ? raise(StandardError, 'remote hung up') : shell_calls << cmd }
       end
 
       it 'reports the failure with recovery guidance and the build link' do
         expect { bumper(payload).run }.to raise_error(StandardError, /remote hung up/)
         expect(github).to have_received(:add_comment)
           .with('osuosl-cookbooks/osl-apache', 42,
-                /Release failed after the PR was merged.*manual recovery.*remote hung up.*jenkins.example.org/m)
+                a_string_including(described_class::RECOVERY_DOCS_URL).and(match(guidance)))
         expect(github).to have_received(:remove_label)
           .with('osuosl-cookbooks/osl-apache', 42, 'bump/minor')
       end

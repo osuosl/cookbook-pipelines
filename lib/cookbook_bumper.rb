@@ -25,10 +25,10 @@ require_relative 'github_helpers'
 # The release: upload any community cookbooks whose `depends` constraints
 # the PR changed (they must exist on the Chef server before this cookbook
 # can upload), then merge the PR, bump the version in metadata.rb, prepend a
-# CHANGELOG entry, tag, push to the PR's base branch (no branch name is ever
-# assumed), and upload to the Chef server and supermarket. If any
-# environments were requested, a result file is written for the Jenkins
-# pipeline to hand to the environment-bumper job.
+# CHANGELOG entry, tag, push the commit and tag atomically to the PR's base
+# branch (no branch name is ever assumed), and upload to the Chef server and
+# supermarket. If any environments were requested, a result file is written
+# for the Jenkins pipeline to hand to the environment-bumper job.
 class CookbookBumper
   class Error < StandardError
   end
@@ -54,6 +54,7 @@ class CookbookBumper
   CHANGELOG_FILE = 'CHANGELOG.md'.freeze
   VERSION_RE = /^(version\s+)(["'])(\d+\.\d+\.\d+)\2$/
   MERGEABLE_ATTEMPTS = 5
+  RECOVERY_DOCS_URL = 'https://github.com/osuosl/cookbook-pipelines#recovering-a-failed-release'.freeze
 
   def self.from_env
     payload = ENV['payload'] || $stdin.read
@@ -297,7 +298,7 @@ class CookbookBumper
   end
 
   # Failures before the merge are retryable by applying the label again;
-  # failures after it may need the manual recovery steps from the docs.
+  # failures after it may need the manual recovery steps in the README.
   # Reporting must never mask the original error.
   def report_failure(error, request)
     # The 'labeled' event only fires on the transition, so a lingering bump
@@ -306,7 +307,8 @@ class CookbookBumper
     # single click; removals never trigger the pipeline.
     remove_bump_label(request)
     guidance = if @merged
-                 'after the PR was merged - the release may be incomplete and need manual recovery (see the docs)'
+                 'after the PR was merged - the release may be incomplete and need manual recovery ' \
+                   "(see #{RECOVERY_DOCS_URL})"
                else
                  'before the PR was merged - nothing was released; fix the cause, then apply the ' \
                    "`bump/#{request[:level]}` label again to retry"
@@ -428,8 +430,10 @@ class CookbookBumper
 
     repo.add(all: true)
     repo.commit("Automatic #{level_of(pr)}-level version bump to v#{version} by Jenkins")
-    repo.tag_add("v#{version}")
-    repo.push('origin', base, tags: true)
+    repo.tag_create("v#{version}")
+    # One --atomic push: the git gem pushes tags separately, which let GitHub
+    # take the bump commit yet reject its tag (osl-nodes v2.32.4).
+    @shell.call('git', '-C', workdir, 'push', '--atomic', 'origin', base, "refs/tags/v#{version}")
 
     upload_cookbook(workdir)
     version

@@ -25,10 +25,10 @@ require_relative 'github_helpers'
 # The release: upload any community cookbooks whose `depends` constraints
 # the PR changed (they must exist on the Chef server before this cookbook
 # can upload), then merge the PR, bump the version in metadata.rb, prepend a
-# CHANGELOG entry, tag, push to the PR's base branch (no branch name is ever
-# assumed), and upload to the Chef server and supermarket. If any
-# environments were requested, a result file is written for the Jenkins
-# pipeline to hand to the environment-bumper job.
+# CHANGELOG entry, tag, push the commit and tag atomically to the PR's base
+# branch (no branch name is ever assumed), and upload to the Chef server and
+# supermarket. If any environments were requested, a result file is written
+# for the Jenkins pipeline to hand to the environment-bumper job.
 class CookbookBumper
   class Error < StandardError
   end
@@ -428,8 +428,10 @@ class CookbookBumper
 
     repo.add(all: true)
     repo.commit("Automatic #{level_of(pr)}-level version bump to v#{version} by Jenkins")
-    repo.tag_add("v#{version}")
-    repo.push('origin', base, tags: true)
+    repo.tag_create("v#{version}")
+    # One --atomic push: the git gem pushes tags separately, which let GitHub
+    # take the bump commit yet reject its tag (osl-nodes v2.32.4).
+    @shell.call('git', '-C', workdir, 'push', '--atomic', 'origin', base, "refs/tags/v#{version}")
 
     upload_cookbook(workdir)
     version

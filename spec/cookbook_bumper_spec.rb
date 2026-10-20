@@ -539,7 +539,7 @@ RSpec.describe CookbookBumper do
         expect { bumper(payload).run }.to raise_error(StandardError, /remote hung up/)
         expect(github).to have_received(:add_comment)
           .with('osuosl-cookbooks/osl-apache', 42,
-                guidance)
+                a_string_including(described_class::RECOVERY_DOCS_URL).and(match(guidance)))
         expect(github).to have_received(:remove_label)
           .with('osuosl-cookbooks/osl-apache', 42, 'bump/minor')
       end

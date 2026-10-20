@@ -54,6 +54,7 @@ class CookbookBumper
   CHANGELOG_FILE = 'CHANGELOG.md'.freeze
   VERSION_RE = /^(version\s+)(["'])(\d+\.\d+\.\d+)\2$/
   MERGEABLE_ATTEMPTS = 5
+  RECOVERY_DOCS_URL = 'https://github.com/osuosl/cookbook-pipelines#recovering-a-failed-release'.freeze
 
   def self.from_env
     payload = ENV['payload'] || $stdin.read
@@ -297,7 +298,7 @@ class CookbookBumper
   end
 
   # Failures before the merge are retryable by applying the label again;
-  # failures after it may need the manual recovery steps from the docs.
+  # failures after it may need the manual recovery steps in the README.
   # Reporting must never mask the original error.
   def report_failure(error, request)
     # The 'labeled' event only fires on the transition, so a lingering bump
@@ -306,7 +307,8 @@ class CookbookBumper
     # single click; removals never trigger the pipeline.
     remove_bump_label(request)
     guidance = if @merged
-                 'after the PR was merged - the release may be incomplete and need manual recovery (see the docs)'
+                 'after the PR was merged - the release may be incomplete and need manual recovery ' \
+                   "(see #{RECOVERY_DOCS_URL})"
                else
                  'before the PR was merged - nothing was released; fix the cause, then apply the ' \
                    "`bump/#{request[:level]}` label again to retry"

@@ -4,11 +4,11 @@
 # env-pin-check is what chef-repo CI runs on the bump PR, so its algorithm is
 # reproduced here exactly (see chef-repo scripts/env-pin-check.rb): each pin
 # resolves to the newest server version it allows, then the dependency
-# closure is walked breadth-first from the pins in file order, and an
-# unpinned dependency floats to the newest version satisfying the first edge
-# that reaches it - any later edge it fails is an error. That is stricter
-# than the Chef server's own solver, but it is the gate the bump PR has to
-# pass.
+# closure is walked breadth-first from the pins in file order, and re-walked
+# until each unpinned dependency floats to the newest version every edge to
+# it accepts - when none does, the edges it fails are errors. Unlike the Chef
+# server's solver it never backtracks further down, but it is the gate the
+# bump PR has to pass.
 #
 # Every environment is checked, not only the selected ones: the Chef server
 # is shared, so a version this release puts on it becomes what unpinned
@@ -72,32 +72,64 @@ class LandingCheck
       end
     end
 
+    floats = {}
+    seen = []
+    loop do
+      walk = walk(universe, resolved, floats)
+      wanted = walk[:edges].to_h do |dep, reqs|
+        [dep, newest(satisfying_all(universe, dep, reqs)) || walk[:resolved][dep]]
+      end.compact
+      settled = wanted == floats
+      unless settled || seen.include?(wanted)
+        seen << floats
+        floats = wanted
+        next
+      end
+
+      unsettled = (floats.keys | wanted.keys).reject { |dep| floats[dep] == wanted[dep] }.map do |dep|
+        versions = [floats[dep], wanted[dep]].compact.sort_by { |v| Gem::Version.new(v) }
+        "#{dep} does not settle between #{(versions + ['unreached']).first(2).join(' and ')}"
+      end
+      return errors + walk[:errors] + unsettled
+    end
+  end
+
+  private
+
+  # One pass from the pins: every edge must accept the resolved version of
+  # its target; an unpinned target takes its float, else the newest match.
+  def walk(universe, pinned, floats)
+    errors = []
+    resolved = pinned.dup
+    edges = Hash.new { |h, k| h[k] = [] }
     queue = resolved.keys
     until queue.empty?
       cb = queue.shift
       ver = resolved[cb]
       (universe.dig(cb, ver, 'dependencies') || {}).each do |dep, constraint|
         req = Gem::Requirement.new(constraint)
-        if resolved.key?(dep)
-          unless req.satisfied_by?(Gem::Version.new(resolved[dep]))
-            errors << "#{cb} #{ver} depends on #{dep} (#{constraint}) but the environment resolves " \
-                      "#{dep} #{resolved[dep]}"
-          end
-        else
+        edges[dep] << req unless pinned.key?(dep)
+        unless resolved.key?(dep)
           candidates = satisfying(universe, dep, req)
           if candidates.empty?
             errors << "#{cb} #{ver} depends on #{dep} (#{constraint}): not satisfiable on chef server and not pinned"
-          else
-            resolved[dep] = newest(candidates)
-            queue << dep
+            next
           end
+          resolved[dep] = floats[dep] || newest(candidates)
+          queue << dep
+        end
+        unless req.satisfied_by?(Gem::Version.new(resolved[dep]))
+          errors << "#{cb} #{ver} depends on #{dep} (#{constraint}) but the environment resolves " \
+                    "#{dep} #{resolved[dep]}"
         end
       end
     end
-    errors
+    { errors: errors, resolved: resolved, edges: edges }
   end
 
-  private
+  def satisfying_all(universe, name, reqs)
+    (universe[name] || {}).keys.select { |v| reqs.all? { |req| req.satisfied_by?(Gem::Version.new(v)) } }
+  end
 
   # The pins once the environment bumper has written this release: updated
   # where pinned, added where addable, and the file re-sorted if it changed.

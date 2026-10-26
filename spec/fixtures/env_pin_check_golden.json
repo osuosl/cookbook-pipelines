@@ -76,6 +76,60 @@
       "5.1.0": {
         "dependencies": {}
       }
+    },
+    "osl-mirror": {
+      "1.0.0": {
+        "dependencies": {
+          "osl-rsync": ">= 0.2.5",
+          "xinetd": ">= 0.0.0"
+        }
+      }
+    },
+    "osl-rsync": {
+      "4.4.6": {
+        "dependencies": {
+          "xinetd": "~> 2.0.0"
+        }
+      }
+    },
+    "xinetd": {
+      "2.0.0": {
+        "dependencies": {}
+      },
+      "4.0.0": {
+        "dependencies": {}
+      }
+    },
+    "y": {
+      "1.0.0": {
+        "dependencies": {
+          "d": ">= 2.0"
+        }
+      }
+    },
+    "q": {
+      "1.0.0": {
+        "dependencies": {
+          "flip": ">= 0"
+        }
+      }
+    },
+    "flip": {
+      "1.0.0": {
+        "dependencies": {}
+      },
+      "2.0.0": {
+        "dependencies": {
+          "flop": ">= 0"
+        }
+      }
+    },
+    "flop": {
+      "1.0.0": {
+        "dependencies": {
+          "flip": "< 2.0"
+        }
+      }
     }
   },
   "cases": [
@@ -85,10 +139,7 @@
         "base": "= 9.16.3",
         "p": "= 1.0.0"
       },
-      "errors": [
-        "base 9.16.3 depends on certificate (~> 2.0.2) but the environment resolves certificate 3.0.0",
-        "p 1.0.0 depends on d (< 2.0) but the environment resolves d 2.0.0"
-      ]
+      "errors": []
     },
     {
       "pins": {
@@ -147,6 +198,38 @@
         "certificate": "2.0.4"
       },
       "errors": []
+    },
+    {
+      "pins": {
+        "osl-mirror": "= 1.0.0",
+        "osl-rsync": "= 4.4.6"
+      },
+      "errors": []
+    },
+    {
+      "pins": {
+        "osl-mirror": "= 1.0.0"
+      },
+      "errors": []
+    },
+    {
+      "pins": {
+        "y": "= 1.0.0",
+        "z": "= 1.0.0"
+      },
+      "errors": [
+        "z 1.0.0 depends on d (< 2.0) but the environment resolves d 2.0.0"
+      ]
+    },
+    {
+      "pins": {
+        "q": "= 1.0.0"
+      },
+      "errors": [
+        "flop 1.0.0 depends on flip (< 2.0) but the environment resolves flip 2.0.0",
+        "flip does not settle between 1.0.0 and 2.0.0",
+        "flop does not settle between 1.0.0 and unreached"
+      ]
     }
   ]
 }

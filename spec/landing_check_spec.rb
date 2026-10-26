@@ -31,15 +31,37 @@ RSpec.describe LandingCheck do
               'certificate 3.0.0 (once it merges)'])
   end
 
-  # chef-repo CI floats d to the newest version a's edge allows, then fails
-  # p's, though d 1.0.0 would have suited both.
-  it 'floats unpinned dependencies exactly as env-pin-check does' do
+  # a reaches d first, but d floats to 1.0.0, the newest that p accepts too.
+  it 'floats an unpinned dependency to the newest version every edge accepts' do
     universe['a'] = { '1.0.0' => { 'dependencies' => { 'd' => '>= 1.0' } } }
     universe['d'] = { '1.0.0' => {}, '2.0.0' => {} }
     uploads = { 'p' => { '1.0.0' => { 'd' => '< 2.0' } } }
 
     expect(check(uploads: uploads, pins: { 'p' => '1.0.0' }).problems('production' => env({ 'a' => '= 1.0.0' })))
+      .to be_empty
+  end
+
+  it 'reports the later edge when no version suits every edge' do
+    universe['a'] = { '1.0.0' => { 'dependencies' => { 'd' => '>= 2.0' } } }
+    universe['d'] = { '1.0.0' => {}, '2.0.0' => {} }
+    uploads = { 'p' => { '1.0.0' => { 'd' => '< 2.0' } } }
+
+    expect(check(uploads: uploads, pins: { 'p' => '1.0.0' }).problems('production' => env({ 'a' => '= 1.0.0' })))
       .to eq(['production: p 1.0.0 depends on d (< 2.0) but the environment resolves d 2.0.0 (once it merges)'])
+  end
+
+  # osl-rsync #48: osl-mirror's unconstrained edge no longer floats xinetd
+  # past what osl-rsync 4.4.6 accepts while the old pin (or version) holds.
+  it 'passes a community upload an earlier unconstrained edge would float to' do
+    universe['osl-mirror'] = { '1.0.0' => { 'dependencies' => { 'osl-rsync' => '>= 0.2.5', 'xinetd' => '>= 0' } } }
+    universe['osl-rsync'] = { '4.4.6' => { 'dependencies' => { 'xinetd' => '~> 2.0.0' } } }
+    universe['xinetd'] = { '2.0.0' => { 'dependencies' => {} } }
+    release = ['osl-rsync', '4.5.0', { 'xinetd' => '~> 4.0.0' }]
+
+    expect(check(uploads: { 'xinetd' => { '4.0.0' => {} } }, release: release, pins: { 'osl-rsync' => '4.5.0' })
+      .problems('production' => env({ 'osl-mirror' => '= 1.0.0', 'osl-rsync' => '= 4.4.6' }),
+                'phpbb' => env({ 'osl-mirror' => '= 1.0.0' }, addable: false)))
+      .to be_empty
   end
 
   # The server is shared: d 3.0.0 becomes what d floats to everywhere, even
@@ -149,10 +171,10 @@ RSpec.describe LandingCheck do
     end
   end
 
-  # The environment bumper only re-sorts a file it changes, and env-pin-check
-  # walks pins in file order.
+  # The environment bumper only re-sorts a file it changes, and with no
+  # version suiting both edges, file order decides which one env-pin-check names.
   it 'keeps the order of a file the bump leaves alone' do
-    universe['a'] = { '1.0.0' => { 'dependencies' => { 'd' => '>= 1.0' } } }
+    universe['a'] = { '1.0.0' => { 'dependencies' => { 'd' => '>= 2.0' } } }
     universe['z'] = { '1.0.0' => { 'dependencies' => { 'd' => '< 2.0' } } }
     universe['d'] = { '1.0.0' => {}, '2.0.0' => {} }
     unsorted = { 'z' => '= 1.0.0', 'a' => '= 1.0.0' }
